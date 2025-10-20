@@ -369,20 +369,18 @@ function isSandboxingEnabled(): boolean {
 
   // On Linux, check if required dependencies are available
   if (getPlatform() === 'linux' && !hasLinuxSandboxDependenciesSync()) {
-    console.error(
-      'Sandbox disabled: Required dependencies not found. Please install: bwrap, socat, and ripgrep',
+    throw new Error(
+      'Required dependencies not found. Please install: bwrap, socat, and ripgrep\n' +
+      '  Install with: apt install bubblewrap socat ripgrep',
     )
-    console.error('  Install with: apt install bubblewrap socat ripgrep')
-    return false
   }
 
   // On macOS, check if required dependencies are available
   if (getPlatform() === 'macos' && !hasMacOSSandboxDependenciesSync()) {
-    console.error(
-      'Sandbox disabled: ripgrep (rg) not found. Please install ripgrep.',
+    throw new Error(
+      'ripgrep (rg) not found. Please install ripgrep.\n' +
+      '  Install with: brew install ripgrep',
     )
-    console.error('  Install with: brew install ripgrep')
-    return false
   }
 
   // Sandbox is always enabled (unless platform is not supported or dependencies are missing)
