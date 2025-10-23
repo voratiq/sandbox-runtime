@@ -4,15 +4,12 @@ import type { SocksProxyWrapper } from './socks-proxy.js'
 import { logForDebugging } from '../utils/debug.js'
 import { getPlatform, type Platform } from '../utils/platform.js'
 import * as fs from 'fs'
-import {
-  WEB_FETCH_TOOL_NAME,
-  FILE_EDIT_TOOL_NAME,
-  FILE_READ_TOOL_NAME,
-} from '../utils/settings.js'
-import { getSettings, permissionRuleValueFromString } from '../utils/settings.js'
+import type {
+  SandboxRuntimeConfig,
+  IgnoreViolationsConfig,
+} from './sandbox-config.js'
 import type {
   SandboxAskCallback,
-  IgnoreViolationsConfig,
   FsReadRestrictionConfig,
   FsWriteRestrictionConfig,
   NetworkRestrictionConfig,
@@ -20,13 +17,11 @@ import type {
 import {
   wrapCommandWithSandboxLinux,
   initializeLinuxNetworkBridge,
-  hasLinuxSandboxDependenciesSync,
   type LinuxNetworkBridgeContext,
 } from './linux-sandbox-utils.js'
 import {
   wrapCommandWithSandboxMacOS,
   startMacOSSandboxLogMonitor,
-  hasMacOSSandboxDependenciesSync,
 } from './macos-sandbox-utils.js'
 import {
   getDefaultWritePaths,
@@ -46,6 +41,7 @@ interface HostNetworkManagerContext {
 // Private Module State
 // ============================================================================
 
+let config: SandboxRuntimeConfig | undefined
 let httpProxyServer: ReturnType<typeof createHttpProxyServer> | undefined
 let socksProxyServer: SocksProxyWrapper | undefined
 let managerContext: HostNetworkManagerContext | undefined
@@ -74,71 +70,16 @@ function registerCleanup(): void {
   cleanupRegistered = true
 }
 
-function getWebFetchRules(behavior: 'allow' | 'deny' | 'ask'): string[] {
-  const settings = getSettings()
-  if (!settings?.permissions) {
-    return []
-  }
-
-  const rulesArray = settings.permissions[behavior] || []
-
-  return rulesArray.filter(ruleString => {
-    const rule = permissionRuleValueFromString(ruleString)
-    return (
-      rule.toolName === WEB_FETCH_TOOL_NAME &&
-      rule.ruleContent?.startsWith('domain:')
-    )
-  })
-}
-
-function matchesWebFetchRule(hostname: string, ruleString: string): boolean {
-  const rule = permissionRuleValueFromString(ruleString)
-  if (
-    rule.toolName !== WEB_FETCH_TOOL_NAME ||
-    !rule.ruleContent?.startsWith('domain:')
-  ) {
-    return false
-  }
-  const domainPattern = rule.ruleContent.substring('domain:'.length)
-
+function matchesDomainPattern(hostname: string, pattern: string): boolean {
   // Support wildcard patterns like *.example.com
   // This matches any subdomain but not the base domain itself
-  if (domainPattern.startsWith('*.')) {
-    const baseDomain = domainPattern.substring(2) // Remove '*.'
+  if (pattern.startsWith('*.')) {
+    const baseDomain = pattern.substring(2) // Remove '*.'
     return hostname.toLowerCase().endsWith('.' + baseDomain.toLowerCase())
   }
 
   // Exact match for non-wildcard patterns
-  return hostname.toLowerCase() === domainPattern.toLowerCase()
-}
-
-function getFileEditRules(behavior: 'allow' | 'deny' | 'ask'): string[] {
-  const settings = getSettings()
-  if (!settings?.permissions) {
-    return []
-  }
-
-  const rulesArray = settings.permissions[behavior] || []
-
-  return rulesArray.filter(ruleString => {
-    const rule = permissionRuleValueFromString(ruleString)
-    return rule.toolName === FILE_EDIT_TOOL_NAME
-  })
-}
-
-function getFileReadRules(behavior: 'allow' | 'deny' | 'ask'): string[] {
-  const settings = getSettings()
-  if (!settings?.permissions) {
-    return []
-  }
-
-  const rulesArray = settings.permissions[behavior] || []
-
-  // Get rules for Read tool
-  return rulesArray.filter(ruleString => {
-    const rule = permissionRuleValueFromString(ruleString)
-    return rule.toolName === FILE_READ_TOOL_NAME
-  })
+  return hostname.toLowerCase() === pattern.toLowerCase()
 }
 
 async function filterNetworkRequest(
@@ -146,30 +87,34 @@ async function filterNetworkRequest(
   host: string,
   sandboxAskCallback?: SandboxAskCallback,
 ): Promise<boolean> {
-  // Check WebFetch permission rules (port-agnostic, hostname only)
-  const denyRules = getWebFetchRules('deny')
-  for (const rule of denyRules) {
-    if (matchesWebFetchRule(host, rule)) {
-      logForDebugging(`Denied by WebFetch rule: ${host}:${port}`)
+  if (!config) {
+    logForDebugging('No config available, denying network request')
+    return false
+  }
+
+  // Check denied domains first
+  for (const deniedDomain of config.network.deniedDomains) {
+    if (matchesDomainPattern(host, deniedDomain)) {
+      logForDebugging(`Denied by config rule: ${host}:${port}`)
       return false
     }
   }
 
-  const allowRules = getWebFetchRules('allow')
-  for (const rule of allowRules) {
-    if (matchesWebFetchRule(host, rule)) {
-      logForDebugging(`Allowed by WebFetch rule: ${host}:${port}`)
+  // Check allowed domains
+  for (const allowedDomain of config.network.allowedDomains) {
+    if (matchesDomainPattern(host, allowedDomain)) {
+      logForDebugging(`Allowed by config rule: ${host}:${port}`)
       return true
     }
   }
 
   // No matching rules - ask user or deny
   if (!sandboxAskCallback) {
-    logForDebugging(`No matching WebFetch rule, denying: ${host}:${port}`)
+    logForDebugging(`No matching config rule, denying: ${host}:${port}`)
     return false
   }
 
-  logForDebugging(`No matching WebFetch rule, asking user: ${host}:${port}`)
+  logForDebugging(`No matching config rule, asking user: ${host}:${port}`)
   try {
     const userAllowed = await sandboxAskCallback({ host, port })
     if (userAllowed) {
@@ -244,43 +189,17 @@ async function startSocksProxyServer(
   })
 }
 
-async function startHttpProxyOrUseExistingPort(
-  providedPort: number | undefined,
-  sandboxAskCallback?: SandboxAskCallback,
-): Promise<number> {
-  if (providedPort !== undefined) {
-    logForDebugging(`Using provided HTTP proxy port: ${providedPort}`)
-    return providedPort
-  }
-  const port = await startHttpProxyServer(sandboxAskCallback)
-  logForDebugging(`Started HTTP proxy server on port ${port}`)
-  return port
-}
-
-async function startSocksProxyOrUseExistingPort(
-  providedPort: number | undefined,
-  sandboxAskCallback?: SandboxAskCallback,
-): Promise<number> {
-  if (providedPort !== undefined) {
-    logForDebugging(`Using provided SOCKS proxy port: ${providedPort}`)
-    return providedPort
-  }
-  const port = await startSocksProxyServer(sandboxAskCallback)
-  logForDebugging(`Started SOCKS proxy server on port ${port}`)
-  return port
-}
-
 // ============================================================================
 // Public Module Functions (will be exported via namespace)
 // ============================================================================
 
 async function initialize(
+  runtimeConfig: SandboxRuntimeConfig,
   sandboxAskCallback?: SandboxAskCallback,
   enableLogMonitor = false,
 ): Promise<void> {
-  if (!isSandboxingEnabled()) {
-    return
-  }
+  // Store config for use by other functions
+  config = runtimeConfig
 
   // Return if already initializing
   if (initializationPromise) {
@@ -288,13 +207,11 @@ async function initialize(
     return
   }
 
-  const settings = getSettings()
-
-  // Start log monitor for macOS if enabled and sandboxing is enabled
-  if (enableLogMonitor && getPlatform() === 'macos' && isSandboxingEnabled()) {
+  // Start log monitor for macOS if enabled
+  if (enableLogMonitor && getPlatform() === 'macos') {
     logMonitorShutdown = startMacOSSandboxLogMonitor(
       sandboxViolationStore.addViolation.bind(sandboxViolationStore),
-      getIgnoreViolations(),
+      config.ignoreViolations,
     )
     logForDebugging('Started macOS sandbox log monitor')
   }
@@ -303,24 +220,12 @@ async function initialize(
   registerCleanup()
 
   // Initialize network infrastructure
-  // Network filtering is based on WebFetch permission rules, so proxy servers
-  // must always be initialized when sandbox is enabled
   initializationPromise = (async () => {
     try {
-      // Check if ports are provided in settings
-      const providedHttpProxyPort = settings.sandbox?.network?.httpProxyPort
-      const providedSocksProxyPort = settings.sandbox?.network?.socksProxyPort
-
-      // Start proxy servers in parallel, using provided ports when available
+      // Start proxy servers in parallel
       const [httpProxyPort, socksProxyPort] = await Promise.all([
-        startHttpProxyOrUseExistingPort(
-          providedHttpProxyPort,
-          sandboxAskCallback,
-        ),
-        startSocksProxyOrUseExistingPort(
-          providedSocksProxyPort,
-          sandboxAskCallback,
-        ),
+        startHttpProxyServer(sandboxAskCallback),
+        startSocksProxyServer(sandboxAskCallback),
       ])
 
       // Initialize platform-specific infrastructure
@@ -362,54 +267,23 @@ function isSupportedPlatform(platform: Platform): boolean {
 }
 
 function isSandboxingEnabled(): boolean {
-  // Sandboxing is not supported on Windows
-  if (!isSupportedPlatform(getPlatform())) {
-    return false
-  }
-
-  // On Linux, check if required dependencies are available
-  if (getPlatform() === 'linux' && !hasLinuxSandboxDependenciesSync()) {
-    throw new Error(
-      'Required dependencies not found. Please install: bwrap, socat, and ripgrep\n' +
-      '  Install with: apt install bubblewrap socat ripgrep',
-    )
-  }
-
-  // On macOS, check if required dependencies are available
-  if (getPlatform() === 'macos' && !hasMacOSSandboxDependenciesSync()) {
-    throw new Error(
-      'ripgrep (rg) not found. Please install ripgrep.\n' +
-      '  Install with: brew install ripgrep',
-    )
-  }
-
-  // Sandbox is always enabled (unless platform is not supported or dependencies are missing)
-  return true
+  // Sandboxing is enabled if config has been set (via initialize())
+  return config !== undefined
 }
 
 
 function getFsReadConfig(): FsReadRestrictionConfig {
-  // Build read config from Read permission deny rules
-  const denyRules = getFileReadRules('deny')
+  if (!config) {
+    return { denyOnly: [] }
+  }
 
-  const denyPaths = denyRules
-    .map(ruleString => {
-      const rule = permissionRuleValueFromString(ruleString)
-      return rule.ruleContent || null
-    })
-    .filter((path): path is string => path !== null)
-    .map(path => {
-      // Normalize by removing trailing /** for consistency
-      return removeTrailingGlobSuffix(path)
-    })
+  // Filter out glob patterns on Linux
+  const denyPaths = config.filesystem.denyRead
+    .map(path => removeTrailingGlobSuffix(path))
     .filter(path => {
-      // On Linux, filter out glob patterns since they're not fully supported
-      // (trailing /** already removed by normalization above)
-      if (getPlatform() === 'linux') {
-        if (containsGlobChars(path)) {
-          logForDebugging(`Skipping glob pattern on Linux: ${path}`)
-          return false
-        }
+      if (getPlatform() === 'linux' && containsGlobChars(path)) {
+        logForDebugging(`Skipping glob pattern on Linux: ${path}`)
+        return false
       }
       return true
     })
@@ -420,55 +294,33 @@ function getFsReadConfig(): FsReadRestrictionConfig {
 }
 
 function getFsWriteConfig(): FsWriteRestrictionConfig {
-  // Build write config from Edit permission allow/deny rules
-  const allowRules = getFileEditRules('allow')
-  const allowPaths = allowRules
-    .map(ruleString => {
-      const rule = permissionRuleValueFromString(ruleString)
-      return rule.ruleContent || null
-    })
-    .filter((path): path is string => path !== null)
-    .map(path => {
-      // Normalize by removing trailing /** for consistency
-      return removeTrailingGlobSuffix(path)
-    })
+  if (!config) {
+    return { allowOnly: getDefaultWritePaths(), denyWithinAllow: [] }
+  }
+
+  // Filter out glob patterns on Linux for allowWrite
+  const allowPaths = config.filesystem.allowWrite
+    .map(path => removeTrailingGlobSuffix(path))
     .filter(path => {
-      // On Linux, filter out glob patterns since they're not fully supported
-      // (trailing /** already removed by normalization above)
-      if (getPlatform() === 'linux') {
-        if (containsGlobChars(path)) {
-          logForDebugging(`Skipping glob pattern on Linux: ${path}`)
-          return false
-        }
+      if (getPlatform() === 'linux' && containsGlobChars(path)) {
+        logForDebugging(`Skipping glob pattern on Linux: ${path}`)
+        return false
       }
       return true
     })
 
-  // Get Edit deny rules - these become the denyWithinAllow paths
-  const denyRules = getFileEditRules('deny')
-  const denyPaths = denyRules
-    .map(ruleString => {
-      const rule = permissionRuleValueFromString(ruleString)
-      return rule.ruleContent || null
-    })
-    .filter((path): path is string => path !== null)
-    .map(path => {
-      // Normalize by removing trailing /** for consistency
-      return removeTrailingGlobSuffix(path)
-    })
+  // Filter out glob patterns on Linux for denyWrite
+  const denyPaths = config.filesystem.denyWrite
+    .map(path => removeTrailingGlobSuffix(path))
     .filter(path => {
-      // On Linux, filter out glob patterns since they're not fully supported
-      // (trailing /** already removed by normalization above)
-      if (getPlatform() === 'linux') {
-        if (containsGlobChars(path)) {
-          logForDebugging(`Skipping glob pattern on Linux: ${path}`)
-          return false
-        }
+      if (getPlatform() === 'linux' && containsGlobChars(path)) {
+        logForDebugging(`Skipping glob pattern on Linux: ${path}`)
+        return false
       }
       return true
     })
 
-  // Build allowOnly list: default paths + Edit allow rules
+  // Build allowOnly list: default paths + configured allow paths
   const allowOnly = [...getDefaultWritePaths(), ...allowPaths]
 
   return {
@@ -478,30 +330,12 @@ function getFsWriteConfig(): FsWriteRestrictionConfig {
 }
 
 function getNetworkRestrictionConfig(): NetworkRestrictionConfig {
-  // Build network config from WebFetch permission allow/deny rules
-  const allowRules = getWebFetchRules('allow')
-  const allowedHosts = allowRules
-    .map(ruleString => {
-      const rule = permissionRuleValueFromString(ruleString)
-      // Extract domain from "domain:example.com" format
-      if (rule.ruleContent?.startsWith('domain:')) {
-        return rule.ruleContent.substring('domain:'.length)
-      }
-      return null
-    })
-    .filter((host): host is string => host !== null)
+  if (!config) {
+    return {}
+  }
 
-  const denyRules = getWebFetchRules('deny')
-  const deniedHosts = denyRules
-    .map(ruleString => {
-      const rule = permissionRuleValueFromString(ruleString)
-      // Extract domain from "domain:example.com" format
-      if (rule.ruleContent?.startsWith('domain:')) {
-        return rule.ruleContent.substring('domain:'.length)
-      }
-      return null
-    })
-    .filter((host): host is string => host !== null)
+  const allowedHosts = config.network.allowedDomains
+  const deniedHosts = config.network.deniedDomains
 
   return {
     ...(allowedHosts.length > 0 && { allowedHosts }),
@@ -510,23 +344,19 @@ function getNetworkRestrictionConfig(): NetworkRestrictionConfig {
 }
 
 function getAllowUnixSockets(): string[] | undefined {
-  const settings = getSettings()
-  return settings.sandbox?.network?.allowUnixSockets
+  return config?.network?.allowUnixSockets
 }
 
 function getAllowLocalBinding(): boolean | undefined {
-  const settings = getSettings()
-  return settings.sandbox?.network?.allowLocalBinding
+  return config?.network?.allowLocalBinding
 }
 
-function getIgnoreViolations(): IgnoreViolationsConfig | undefined {
-  const settings = getSettings()
-  return settings.sandbox?.ignoreViolations
+function getIgnoreViolations(): Record<string, string[]> | undefined {
+  return config?.ignoreViolations
 }
 
 function getEnableWeakerNestedSandbox(): boolean | undefined {
-  const settings = getSettings()
-  return settings.sandbox?.enableWeakerNestedSandbox
+  return config?.enableWeakerNestedSandbox
 }
 
 function getProxyPort(): number | undefined {
@@ -550,7 +380,7 @@ function getLinuxSocksSocketPath(): string | undefined {
  * Returns true if initialized successfully, false otherwise
  */
 async function waitForNetworkInitialization(): Promise<boolean> {
-  if (!isSandboxingEnabled()) {
+  if (!config) {
     return false
   }
   if (initializationPromise) {
@@ -565,18 +395,15 @@ async function waitForNetworkInitialization(): Promise<boolean> {
 }
 
 async function wrapWithSandbox(command: string): Promise<string> {
-  // If no sandboxing is enabled, return command as-is
-  if (!isSandboxingEnabled()) {
+  // If no config, return command as-is
+  if (!config) {
     return command
   }
 
   const platform = getPlatform()
-  const isSandboxed = isSandboxingEnabled()
 
-  // Wait for network initialization if needed
-  if (isSandboxed) {
-    await waitForNetworkInitialization()
-  }
+  // Wait for network initialization
+  await waitForNetworkInitialization()
 
   switch (platform) {
     case 'macos':
@@ -753,40 +580,28 @@ function annotateStderrWithSandboxFailures(
  * Patterns ending with /** are excluded since they work as subpaths.
  */
 function getLinuxGlobPatternWarnings(): string[] {
-  // Only warn on Linux with sandboxing enabled
+  // Only warn on Linux
   // macOS supports glob patterns via regex conversion
-  if (getPlatform() !== 'linux' || !isSandboxingEnabled()) {
-    return []
-  }
-
-  const settings = getSettings()
-  if (!settings?.permissions) {
+  if (getPlatform() !== 'linux' || !config) {
     return []
   }
 
   const globPatterns: string[] = []
 
-  // Check allow and deny rules for glob patterns
-  for (const behavior of ['allow', 'deny'] as const) {
-    const rules = settings.permissions[behavior] || []
-    for (const ruleString of rules) {
-      const rule = permissionRuleValueFromString(ruleString)
+  // Check filesystem paths for glob patterns
+  const allPaths = [
+    ...config.filesystem.denyRead,
+    ...config.filesystem.allowWrite,
+    ...config.filesystem.denyWrite,
+  ]
 
-      // Only check Edit and Read rules (file operations)
-      if (
-        (rule.toolName === 'Edit' || rule.toolName === 'Read') &&
-        rule.ruleContent
-      ) {
-        // Strip trailing /** since that's just a subpath (directory and everything under it)
-        const pathWithoutTrailingStar = removeTrailingGlobSuffix(
-          rule.ruleContent,
-        )
+  for (const path of allPaths) {
+    // Strip trailing /** since that's just a subpath (directory and everything under it)
+    const pathWithoutTrailingStar = removeTrailingGlobSuffix(path)
 
-        // Only warn if there are still glob characters after removing trailing /**
-        if (containsGlobChars(pathWithoutTrailingStar)) {
-          globPatterns.push(ruleString)
-        }
-      }
+    // Only warn if there are still glob characters after removing trailing /**
+    if (containsGlobChars(pathWithoutTrailingStar)) {
+      globPatterns.push(path)
     }
   }
 
@@ -802,6 +617,7 @@ function getLinuxGlobPatternWarnings(): string[] {
  */
 export interface ISandboxManager {
   initialize(
+    runtimeConfig: SandboxRuntimeConfig,
     sandboxAskCallback?: SandboxAskCallback,
     enableLogMonitor?: boolean,
   ): Promise<void>

@@ -1,9 +1,60 @@
 #!/usr/bin/env node
 import { Command } from 'commander'
 import { SandboxManager } from './index.js'
+import type { SandboxRuntimeConfig } from './index.js'
 import { spawn } from 'child_process'
 import { logForDebugging } from './utils/debug.js'
-import { setFlagSettingsPath } from './utils/settings.js'
+import * as fs from 'fs'
+import * as path from 'path'
+import * as os from 'os'
+
+/**
+ * Load sandbox configuration from a file
+ */
+function loadConfig(filePath: string): SandboxRuntimeConfig | null {
+  try {
+    if (!fs.existsSync(filePath)) {
+      return null
+    }
+    const content = fs.readFileSync(filePath, 'utf-8')
+    if (content.trim() === '') {
+      return null
+    }
+    return JSON.parse(content) as SandboxRuntimeConfig
+  } catch (error) {
+    // Log parse errors to help users debug invalid config files
+    if (error instanceof SyntaxError) {
+      console.error(`Invalid JSON in config file ${filePath}: ${error.message}`)
+    } else {
+      console.error(`Failed to load config from ${filePath}: ${error}`)
+    }
+    return null
+  }
+}
+
+/**
+ * Get default config path
+ */
+function getDefaultConfigPath(): string {
+  return path.join(os.homedir(), '.sandbox-runtime-settings.json')
+}
+
+/**
+ * Create a minimal default config if no config file exists
+ */
+function getDefaultConfig(): SandboxRuntimeConfig {
+  return {
+    network: {
+      allowedDomains: [],
+      deniedDomains: [],
+    },
+    filesystem: {
+      denyRead: [],
+      allowWrite: [],
+      denyWrite: [],
+    },
+  }
+}
 
 async function main(): Promise<void> {
   const program = new Command()
@@ -21,7 +72,7 @@ async function main(): Promise<void> {
     .option('-d, --debug', 'enable debug logging')
     .option(
       '-s, --settings <path>',
-      'path to settings file (default: ~/.claude/settings.json)',
+      'path to config file (default: ~/.sandbox-runtime-settings.json)',
     )
     .allowUnknownOption()
     .action(
@@ -35,14 +86,18 @@ async function main(): Promise<void> {
             process.env.DEBUG = 'true'
           }
 
-          // Set flag settings path if provided
-          if (options.settings) {
-            setFlagSettingsPath(options.settings)
+          // Load config from file
+          const configPath = options.settings || getDefaultConfigPath()
+          let runtimeConfig = loadConfig(configPath)
+
+          if (!runtimeConfig) {
+            logForDebugging(`No config found at ${configPath}, using default config`)
+            runtimeConfig = getDefaultConfig()
           }
 
-          // Initialize sandbox
+          // Initialize sandbox with config
           logForDebugging('Initializing sandbox...')
-          await SandboxManager.initialize()
+          await SandboxManager.initialize(runtimeConfig)
 
           // Join command arguments into a single command string
           const command = commandArgs.join(' ')
