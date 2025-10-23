@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { Command } from 'commander'
 import { SandboxManager } from './index.js'
-import type { SandboxRuntimeConfig } from './index.js'
+import { SandboxRuntimeConfigSchema, type SandboxRuntimeConfig } from './sandbox/sandbox-config.js'
 import { spawn } from 'child_process'
 import { logForDebugging } from './utils/debug.js'
 import * as fs from 'fs'
@@ -9,7 +9,7 @@ import * as path from 'path'
 import * as os from 'os'
 
 /**
- * Load sandbox configuration from a file
+ * Load and validate sandbox configuration from a file
  */
 function loadConfig(filePath: string): SandboxRuntimeConfig | null {
   try {
@@ -20,7 +20,23 @@ function loadConfig(filePath: string): SandboxRuntimeConfig | null {
     if (content.trim() === '') {
       return null
     }
-    return JSON.parse(content) as SandboxRuntimeConfig
+
+    // Parse JSON
+    const parsed = JSON.parse(content)
+
+    // Validate with zod schema
+    const result = SandboxRuntimeConfigSchema.safeParse(parsed)
+
+    if (!result.success) {
+      console.error(`Invalid configuration in ${filePath}:`)
+      result.error.issues.forEach((issue) => {
+        const path = issue.path.join('.')
+        console.error(`  - ${path}: ${issue.message}`)
+      })
+      return null
+    }
+
+    return result.data
   } catch (error) {
     // Log parse errors to help users debug invalid config files
     if (error instanceof SyntaxError) {
