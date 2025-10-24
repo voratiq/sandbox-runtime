@@ -208,7 +208,7 @@ async function initialize(
   if (enableLogMonitor && getPlatform() === 'macos') {
     logMonitorShutdown = startMacOSSandboxLogMonitor(
       sandboxViolationStore.addViolation.bind(sandboxViolationStore),
-      config.ignoreViolations?.commands,
+      config.ignoreViolations,
     )
     logForDebugging('Started macOS sandbox log monitor')
   }
@@ -353,7 +353,7 @@ function getAllowLocalBinding(): boolean | undefined {
 }
 
 function getIgnoreViolations(): Record<string, string[]> | undefined {
-  return config?.ignoreViolations?.commands
+  return config?.ignoreViolations
 }
 
 function getEnableWeakerNestedSandbox(): boolean | undefined {
