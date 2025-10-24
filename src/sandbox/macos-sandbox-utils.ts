@@ -9,8 +9,8 @@ import {
   decodeSandboxedCommand,
   containsGlobChars,
 } from './sandbox-utils.js'
+import type { IgnoreViolationsConfig } from './sandbox-config.js'
 import type {
-  IgnoreViolationsConfig,
   FsReadRestrictionConfig,
   FsWriteRestrictionConfig,
 } from './sandbox-schemas.js'
