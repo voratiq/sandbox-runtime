@@ -21,6 +21,7 @@ import {
   hasSeccompDependenciesSync,
   hasPython3Sync,
   getApplySeccompExecPath,
+  getPreGeneratedBpfPath,
 } from './generate-seccomp-filter.js'
 
 export interface LinuxNetworkBridgeContext {
@@ -74,8 +75,9 @@ function registerSeccompCleanupHandler(): void {
 /**
  * Check if Linux sandbox dependencies are available (synchronous)
  * Returns true if bwrap, socat, and python3 are installed.
- * Unless allowAllUnixSockets is enabled, also requires seccomp dependencies
- * (gcc/clang and libseccomp-dev for non-x64/arm64 architectures).
+ * Unless allowAllUnixSockets is enabled, also requires seccomp dependencies:
+ * - On x64/arm64: Only Python 3 is required (pre-generated BPF filters available)
+ * - On other architectures: gcc/clang and libseccomp-dev are required for runtime compilation
  */
 export function hasLinuxSandboxDependenciesSync(allowAllUnixSockets = false): boolean {
   try {
@@ -96,9 +98,19 @@ export function hasLinuxSandboxDependenciesSync(allowAllUnixSockets = false): bo
     }
 
     // Also require seccomp dependencies unless allowAllUnixSockets is enabled
-    // Note: On x64/arm64, pre-generated BPF filters are available, so gcc/clang are not required
     if (!allowAllUnixSockets) {
-      return hasBasicDeps && hasSeccompDependenciesSync()
+      // Check if we have a pre-generated BPF filter for this architecture
+      const hasPreGeneratedBpf = getPreGeneratedBpfPath() !== null
+
+      if (hasPreGeneratedBpf) {
+        // Pre-generated BPF available (x64/arm64) - only Python 3 is required
+        // No need for gcc/clang + libseccomp-dev
+        return hasBasicDeps
+      } else {
+        // No pre-generated BPF - need compilation dependencies
+        // This includes gcc/clang + libseccomp-dev for runtime BPF generation
+        return hasBasicDeps && hasSeccompDependenciesSync()
+      }
     }
 
     return hasBasicDeps

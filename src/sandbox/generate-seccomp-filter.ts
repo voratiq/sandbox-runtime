@@ -146,7 +146,7 @@ export const hasSeccompDependenciesSync = memoize((): boolean => {
  * Pre-generated BPF files are organized by architecture:
  * - vendor/seccomp/{x64,arm64}/unix-block.bpf
  */
-function getPreGeneratedBpfPath(): string | null {
+export function getPreGeneratedBpfPath(): string | null {
 
   // Determine architecture
   const arch = getVendorArchitecture()

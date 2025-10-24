@@ -9,6 +9,7 @@ import {
   cleanupSeccompFilter,
   hasSeccompDependenciesSync,
   getApplySeccompExecPath,
+  getPreGeneratedBpfPath,
 } from '../../src/sandbox/generate-seccomp-filter.js'
 import {
   wrapCommandWithSandboxLinux,
@@ -74,6 +75,84 @@ describe('Seccomp Dependencies', () => {
 
     expect(result1).toBe(result2)
     expect(result2).toBe(result3)
+  })
+})
+
+describe('Pre-generated BPF Support', () => {
+  it('should detect pre-generated BPF files on x64/arm64', () => {
+    if (skipIfNotLinux()) {
+      return
+    }
+
+    // Check if current architecture supports pre-generated BPF
+    const arch = process.arch
+    const preGeneratedBpf = getPreGeneratedBpfPath()
+
+    if (arch === 'x64' || arch === 'x86_64' || arch === 'arm64' || arch === 'aarch64') {
+      // Should have pre-generated BPF for these architectures
+      expect(preGeneratedBpf).toBeTruthy()
+      if (preGeneratedBpf) {
+        expect(existsSync(preGeneratedBpf)).toBe(true)
+        expect(preGeneratedBpf).toContain('vendor/seccomp')
+        expect(preGeneratedBpf).toMatch(/unix-block\.bpf$/)
+      }
+    } else {
+      // Other architectures should not have pre-generated BPF
+      expect(preGeneratedBpf).toBeNull()
+    }
+  })
+
+  it('should not require gcc/clang when pre-generated BPF exists', () => {
+    if (skipIfNotLinux()) {
+      return
+    }
+
+    const preGeneratedBpf = getPreGeneratedBpfPath()
+
+    // Only test on architectures with pre-generated BPF
+    if (!preGeneratedBpf) {
+      return
+    }
+
+    // Check if we have compilation dependencies
+    const hasCompilationDeps = hasSeccompDependenciesSync()
+
+    // hasLinuxSandboxDependenciesSync should succeed even without compilation deps
+    // as long as we have bwrap, socat, and Python 3
+    const hasSandboxDeps = hasLinuxSandboxDependenciesSync()
+
+    // On x64/arm64 with pre-generated BPF, we should have sandbox deps
+    // regardless of whether compilation deps are available
+    const bwrapResult = spawnSync('which', ['bwrap'], { stdio: 'ignore' })
+    const socatResult = spawnSync('which', ['socat'], { stdio: 'ignore' })
+    const python3Result = spawnSync('python3', ['--version'], { stdio: 'ignore' })
+
+    if (bwrapResult.status === 0 && socatResult.status === 0 && python3Result.status === 0) {
+      // Basic deps + Python 3 available - should have sandbox deps
+      expect(hasSandboxDeps).toBe(true)
+    }
+  })
+
+  it('should still require gcc/clang on unsupported architectures', () => {
+    if (skipIfNotLinux()) {
+      return
+    }
+
+    const preGeneratedBpf = getPreGeneratedBpfPath()
+
+    // Only test on architectures WITHOUT pre-generated BPF
+    if (preGeneratedBpf !== null) {
+      return
+    }
+
+    // On architectures without pre-generated BPF, compilation deps are required
+    const hasSandboxDeps = hasLinuxSandboxDependenciesSync()
+    const hasCompilationDeps = hasSeccompDependenciesSync()
+
+    if (hasSandboxDeps) {
+      // If sandbox deps are satisfied, compilation deps must be available
+      expect(hasCompilationDeps).toBe(true)
+    }
   })
 })
 
