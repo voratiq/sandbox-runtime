@@ -7,7 +7,7 @@ export type {
   SandboxRuntimeConfig,
   NetworkConfig,
   FilesystemConfig,
-  IgnoreViolationsConfig as ViolationIgnoreConfig,
+  IgnoreViolationsConfig,
 } from './sandbox/sandbox-config.js'
 
 export {
@@ -25,7 +25,6 @@ export type {
   NetworkRestrictionConfig,
   NetworkHostPattern,
   SandboxConfig,
-  IgnoreViolationsConfig,
 } from './sandbox/sandbox-schemas.js'
 export { SandboxConfigSchema } from './sandbox/sandbox-schemas.js'
 
