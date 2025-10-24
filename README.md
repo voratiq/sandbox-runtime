@@ -387,10 +387,11 @@ Watchman accesses files outside the sandbox boundaries, which will trigger permi
   - Ubuntu/Debian: `apt-get install socat`
   - Fedora: `dnf install socat`
   - Arch: `pacman -S socat`
-- `python3` - Required for applying seccomp filters (typically pre-installed on Linux)
+- **`python3` - REQUIRED for applying seccomp filters** (typically pre-installed on Linux)
   - Ubuntu/Debian: `apt-get install python3`
   - Fedora: `dnf install python3`
   - Arch: `pacman -S python`
+  - **Note:** Python 3 is mandatory for Unix socket blocking security. To disable this security feature, set `allowAllUnixSockets: true` in your configuration.
 - `ripgrep` - Fast search tool for deny path detection
   - Ubuntu/Debian: `apt-get install ripgrep`
   - Fedora: `dnf install ripgrep`

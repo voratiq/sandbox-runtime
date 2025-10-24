@@ -379,7 +379,9 @@ export function generateSeccompFilter(): string | null {
   // Check for Python 3 first - required for applying seccomp filters
   if (!hasPython3Sync()) {
     logForDebugging(
-      '[SeccompFilter] Python 3 is not available. Python 3 is required for applying seccomp filters via the helper script.',
+      '[SeccompFilter] Python 3 is not available. ' +
+        'Python 3 is required for applying seccomp filters via the helper script. ' +
+        'Install Python 3 (e.g., "apt-get install python3") or set allowAllUnixSockets: true to disable Unix socket blocking.',
       { level: 'error' },
     )
     return null

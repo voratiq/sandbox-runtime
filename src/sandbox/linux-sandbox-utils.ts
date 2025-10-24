@@ -270,16 +270,13 @@ function buildSandboxCommand(
     // Get the path to the apply-seccomp Python script
     const applySeccompScript = getApplySeccompExecPath()
     if (!applySeccompScript) {
-      logForDebugging(
-        '[Sandbox Linux] Failed to get apply-seccomp script, running command without seccomp',
-        { level: 'warn' },
+      // Fail fast - seccomp filtering is required for security when enabled
+      throw new Error(
+        'Failed to get apply-seccomp-and-exec.py script. ' +
+          'Python 3 is required for applying seccomp filters but is not available on this system. ' +
+          'Please install Python 3 (e.g., "apt-get install python3" on Ubuntu/Debian). ' +
+          'To disable Unix socket blocking entirely, set allowAllUnixSockets: true in your configuration.',
       )
-      // Fallback: run user command directly without seccomp
-      const innerScript = [
-        ...socatCommands,
-        `eval ${shellquote.quote([userCommand])}`,
-      ].join('\n')
-      return `bash -c ${shellquote.quote([innerScript])}`
     }
 
     // Build command: python3 apply-seccomp-and-exec.py <filterPath> -- <userCommand>
