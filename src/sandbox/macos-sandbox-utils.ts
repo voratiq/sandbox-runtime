@@ -1,6 +1,7 @@
 import shellquote from 'shell-quote'
-import { spawn, spawnSync } from 'child_process'
+import { spawn } from 'child_process'
 import { logForDebugging } from '../utils/debug.js'
+import { hasRipgrepSync } from '../utils/ripgrep.js'
 import {
   normalizePathForSandbox,
   generateProxyEnvVars,
@@ -10,13 +11,10 @@ import {
   containsGlobChars,
 } from './sandbox-utils.js'
 import type {
-  IgnoreViolationsConfig,
   FsReadRestrictionConfig,
   FsWriteRestrictionConfig,
 } from './sandbox-schemas.js'
-
-// Cache for macOS sandbox dependencies check
-let macosDepsCache: boolean | undefined
+import type { IgnoreViolationsConfig } from './sandbox-config.js'
 
 /**
  * Check if macOS sandbox dependencies are available (synchronous)
@@ -24,22 +22,7 @@ let macosDepsCache: boolean | undefined
  * Cached to avoid repeated system calls
  */
 export function hasMacOSSandboxDependenciesSync(): boolean {
-  if (macosDepsCache !== undefined) {
-    return macosDepsCache
-  }
-
-  try {
-    const rgResult = spawnSync('which', ['rg'], {
-      stdio: 'ignore',
-      timeout: 1000,
-    })
-
-    macosDepsCache = rgResult.status === 0
-    return macosDepsCache
-  } catch {
-    macosDepsCache = false
-    return false
-  }
+  return hasRipgrepSync()
 }
 
 export interface MacOSSandboxParams {

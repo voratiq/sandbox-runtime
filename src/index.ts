@@ -24,9 +24,7 @@ export type {
   FsWriteRestrictionConfig,
   NetworkRestrictionConfig,
   NetworkHostPattern,
-  SandboxConfig,
 } from './sandbox/sandbox-schemas.js'
-export { SandboxConfigSchema } from './sandbox/sandbox-schemas.js'
 
 // Platform-specific utilities
 export { hasLinuxSandboxDependenciesSync } from './sandbox/linux-sandbox-utils.js'
