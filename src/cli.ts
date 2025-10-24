@@ -52,7 +52,7 @@ function loadConfig(filePath: string): SandboxRuntimeConfig | null {
  * Get default config path
  */
 function getDefaultConfigPath(): string {
-  return path.join(os.homedir(), '.sandbox-runtime-settings.json')
+  return path.join(os.homedir(), '.srt-settings.json')
 }
 
 /**
@@ -88,7 +88,7 @@ async function main(): Promise<void> {
     .option('-d, --debug', 'enable debug logging')
     .option(
       '-s, --settings <path>',
-      'path to config file (default: ~/.sandbox-runtime-settings.json)',
+      'path to config file (default: ~/.srt-settings.json)',
     )
     .allowUnknownOption()
     .action(
