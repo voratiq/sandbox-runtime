@@ -281,7 +281,19 @@ export const NetworkConfigSchema = z
       .array(z.string())
       .optional()
       .describe(
-        'Allow Unix domain sockets for local IPC (SSH agent, Docker, etc.). Provide an array of specific paths. Defaults to blocking if not specified',
+        'Allow Unix domain sockets for local IPC (SSH agent, Docker, etc.). Provide an array of specific paths. Defaults to blocking if not specified. ' +
+          'IMPORTANT: On Linux, this configuration is not supported.',
+      ),
+    allowAllUnixSockets: z
+      .boolean()
+      .optional()
+      .describe(
+        'Allow all Unix domain socket connections without restrictions. ' +
+          'On Linux, this disables the seccomp filter that blocks Unix sockets and allows sandboxing without seccomp dependencies (gcc/clang/libseccomp-dev). ' +
+          'On macOS, this allows all Unix socket paths. ' +
+          'WARNING: This significantly reduces sandbox security by allowing arbitrary Unix socket connections. ' +
+          'Only enable if Unix socket access is required and the security trade-off is acceptable. ' +
+          'Default: false (secure).',
       ),
     allowLocalBinding: z
       .boolean()

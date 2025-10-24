@@ -118,7 +118,10 @@ export function getDefaultWritePaths(): string[] {
     '/dev/tty',
     '/dev/dtracehelper',
     '/dev/autofs_nowait',
+    '/tmp/claude',
+    '/private/tmp/claude',
     path.join(homeDir, '.npm/_logs'),
+    path.join(homeDir, '.claude/debug'),
     '.',
   ]
 
@@ -304,9 +307,9 @@ export function generateProxyEnvVars(
   httpProxyPort?: number,
   socksProxyPort?: number,
 ): string[] {
-  const envVars: string[] = [`SANDBOX_RUNTIME=1`]
+  const envVars: string[] = [`SANDBOX_RUNTIME=1`, `TMPDIR=/tmp/claude`]
 
-  // If no proxy ports provided, return empty array
+  // If no proxy ports provided, return minimal env vars
   if (!httpProxyPort && !socksProxyPort) {
     return envVars
   }

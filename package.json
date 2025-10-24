@@ -13,9 +13,12 @@
   },
   "scripts": {
     "build": "tsc",
+    "postbuild": "[ -d vendor ] && cp -r vendor dist/ || true",
+    "build:seccomp": "scripts/build-seccomp-binaries.sh",
     "clean": "rm -rf dist",
-    "typecheck": "tsc --noEmit",
+    "test": "bun test",
     "test:integration": "bun test test/sandbox/integration.test.ts",
+    "typecheck": "tsc --noEmit",
     "lint": "eslint 'src/**/*.ts' --fix --cache --cache-location=node_modules/.cache/.eslintcache",
     "lint:check": "eslint 'src/**/*.ts' --cache --cache-location=node_modules/.cache/.eslintcache",
     "format": "prettier --write 'src/**/*.ts' --cache --log-level warn",
@@ -46,6 +49,7 @@
   },
   "files": [
     "dist",
+    "vendor",
     "README.md",
     "LICENSE"
   ],

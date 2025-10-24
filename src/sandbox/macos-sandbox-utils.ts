@@ -9,8 +9,8 @@ import {
   decodeSandboxedCommand,
   containsGlobChars,
 } from './sandbox-utils.js'
-import type { IgnoreViolationsConfig } from './sandbox-config.js'
 import type {
+  IgnoreViolationsConfig,
   FsReadRestrictionConfig,
   FsWriteRestrictionConfig,
 } from './sandbox-schemas.js'
@@ -48,6 +48,7 @@ export interface MacOSSandboxParams {
   socksProxyPort?: number
   needsNetworkRestriction: boolean
   allowUnixSockets?: string[]
+  allowAllUnixSockets?: boolean
   allowLocalBinding?: boolean
   readConfig: FsReadRestrictionConfig | undefined
   writeConfig: FsWriteRestrictionConfig | undefined
@@ -240,6 +241,7 @@ async function generateSandboxProfile({
   socksProxyPort,
   needsNetworkRestriction,
   allowUnixSockets,
+  allowAllUnixSockets,
   allowLocalBinding,
   logTag,
 }: {
@@ -249,6 +251,7 @@ async function generateSandboxProfile({
   socksProxyPort?: number
   needsNetworkRestriction: boolean
   allowUnixSockets?: string[]
+  allowAllUnixSockets?: boolean
   allowLocalBinding?: boolean
   logTag: string
 }): Promise<string> {
@@ -408,14 +411,17 @@ async function generateSandboxProfile({
       profile.push('(allow network-outbound (local ip "localhost:*"))')
     }
     // Unix domain sockets for local IPC (SSH agent, Docker, etc.)
-    if (allowUnixSockets && allowUnixSockets.length > 0) {
+    if (allowAllUnixSockets) {
+      // Allow all Unix socket paths
+      profile.push('(allow network* (subpath "/"))')
+    } else if (allowUnixSockets && allowUnixSockets.length > 0) {
       // Allow specific Unix socket paths
       for (const socketPath of allowUnixSockets) {
         const normalizedPath = normalizePathForSandbox(socketPath)
         profile.push(`(allow network* (subpath ${escapePath(normalizedPath)}))`)
       }
     }
-    // If allowUnixSockets is undefined or empty array, Unix sockets are blocked by default
+    // If both allowAllUnixSockets and allowUnixSockets are false/undefined/empty, Unix sockets are blocked by default
 
     // Allow localhost TCP operations for the HTTP proxy
     if (httpProxyPort !== undefined) {
@@ -501,6 +507,7 @@ export async function wrapCommandWithSandboxMacOS(
     socksProxyPort,
     needsNetworkRestriction,
     allowUnixSockets,
+    allowAllUnixSockets,
     allowLocalBinding,
     readConfig,
     writeConfig,
@@ -520,6 +527,7 @@ export async function wrapCommandWithSandboxMacOS(
     socksProxyPort,
     needsNetworkRestriction,
     allowUnixSockets,
+    allowAllUnixSockets,
     allowLocalBinding,
     logTag,
   })

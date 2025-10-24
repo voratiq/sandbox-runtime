@@ -1,0 +1,97 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+
+jobs:
+  integration-tests:
+    name: Integration Tests (${{ matrix.os }} / ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86-64
+            runner: ubuntu-latest
+            os: linux
+          # ARM64 Linux runners (ubuntu-24.04-arm) only work in public repositories
+          # This is a private repository, so commenting out:
+          # - arch: arm64
+          #   runner: ubuntu-24.04-arm
+          #   os: linux
+          - arch: x86-64
+            runner: macos-13
+            os: macos
+          - arch: arm64
+            runner: macos-14
+            os: macos
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install system dependencies (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap libseccomp-dev gcc socat ripgrep apparmor-profiles
+
+      - name: Enable unprivileged user namespaces (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          # Ubuntu 24.04+ restricts unprivileged user namespaces by default
+          # Set setuid bit on bwrap to allow namespace creation
+          echo "Setting setuid bit on bwrap..."
+          sudo chmod u+s $(which bwrap)
+
+          # Verify bwrap can create namespaces
+          echo "Testing bwrap namespace creation..."
+          bwrap --ro-bind / / --unshare-net true && echo "✓ bwrap namespace creation works" || echo "✗ bwrap namespace creation still fails"
+
+      - name: Install system dependencies (macOS)
+        if: matrix.os == 'macos'
+        run: |
+          brew install ripgrep
+
+      - name: Configure npm
+        env:
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_SECRET }}
+        run: |
+          cat > .npmrc << EOF
+          engine-strict=true
+          registry=https://artifactory.infra.ant.dev/artifactory/api/npm/npm-all/
+          //artifactory.infra.ant.dev/artifactory/api/npm/npm-all/:_authToken=${ARTIFACTORY_TOKEN}
+          EOF
+
+      - name: Install Node dependencies
+        run: npm install
+
+      - name: Build project
+        run: npm run build
+
+      - name: Run integration tests
+        run: npm run test:integration
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            test-results/
+            *.log
+          if-no-files-found: ignore

@@ -4,10 +4,7 @@ import type { SocksProxyWrapper } from './socks-proxy.js'
 import { logForDebugging } from '../utils/debug.js'
 import { getPlatform, type Platform } from '../utils/platform.js'
 import * as fs from 'fs'
-import type {
-  SandboxRuntimeConfig,
-  IgnoreViolationsConfig,
-} from './sandbox-config.js'
+import type { SandboxRuntimeConfig } from './sandbox-config.js'
 import type {
   SandboxAskCallback,
   FsReadRestrictionConfig,
@@ -211,7 +208,7 @@ async function initialize(
   if (enableLogMonitor && getPlatform() === 'macos') {
     logMonitorShutdown = startMacOSSandboxLogMonitor(
       sandboxViolationStore.addViolation.bind(sandboxViolationStore),
-      config.ignoreViolations,
+      config.ignoreViolations?.commands,
     )
     logForDebugging('Started macOS sandbox log monitor')
   }
@@ -347,12 +344,16 @@ function getAllowUnixSockets(): string[] | undefined {
   return config?.network?.allowUnixSockets
 }
 
+function getAllowAllUnixSockets(): boolean | undefined {
+  return config?.network?.allowAllUnixSockets
+}
+
 function getAllowLocalBinding(): boolean | undefined {
   return config?.network?.allowLocalBinding
 }
 
 function getIgnoreViolations(): Record<string, string[]> | undefined {
-  return config?.ignoreViolations
+  return config?.ignoreViolations?.commands
 }
 
 function getEnableWeakerNestedSandbox(): boolean | undefined {
@@ -415,6 +416,7 @@ async function wrapWithSandbox(command: string): Promise<string> {
         writeConfig: getFsWriteConfig(),
         needsNetworkRestriction: true,
         allowUnixSockets: getAllowUnixSockets(),
+        allowAllUnixSockets: getAllowAllUnixSockets(),
         allowLocalBinding: getAllowLocalBinding(),
         ignoreViolations: getIgnoreViolations(),
       })
@@ -431,6 +433,7 @@ async function wrapWithSandbox(command: string): Promise<string> {
         readConfig: getFsReadConfig(),
         writeConfig: getFsWriteConfig(),
         enableWeakerNestedSandbox: getEnableWeakerNestedSandbox(),
+        allowAllUnixSockets: getAllowAllUnixSockets(),
       })
 
     default:
@@ -553,7 +556,7 @@ function annotateStderrWithSandboxFailures(
   command: string,
   stderr: string,
 ): string {
-  if (!isSandboxingEnabled()) {
+  if (!config) {
     return stderr
   }
 
@@ -590,6 +593,7 @@ function getLinuxGlobPatternWarnings(): string[] {
 
   // Check filesystem paths for glob patterns
   const allPaths = [
+    ...config.filesystem.allowRead,
     ...config.filesystem.denyRead,
     ...config.filesystem.allowWrite,
     ...config.filesystem.denyWrite,
@@ -628,7 +632,6 @@ export interface ISandboxManager {
   getNetworkRestrictionConfig(): NetworkRestrictionConfig
   getAllowUnixSockets(): string[] | undefined
   getAllowLocalBinding(): boolean | undefined
-  getIgnoreViolations(): IgnoreViolationsConfig | undefined
   getEnableWeakerNestedSandbox(): boolean | undefined
   getProxyPort(): number | undefined
   getSocksProxyPort(): number | undefined
@@ -659,7 +662,6 @@ export const SandboxManager: ISandboxManager = {
   getNetworkRestrictionConfig,
   getAllowUnixSockets,
   getAllowLocalBinding,
-  getIgnoreViolations,
   getEnableWeakerNestedSandbox,
   getProxyPort,
   getSocksProxyPort,

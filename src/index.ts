@@ -7,7 +7,7 @@ export type {
   SandboxRuntimeConfig,
   NetworkConfig,
   FilesystemConfig,
-  IgnoreViolationsConfig,
+  IgnoreViolationsConfig as ViolationIgnoreConfig,
 } from './sandbox/sandbox-config.js'
 
 export {
@@ -17,10 +17,21 @@ export {
   IgnoreViolationsConfigSchema,
 } from './sandbox/sandbox-config.js'
 
-// Schema types (for backward compatibility and internal use)
+// Schema types and utilities
 export type {
   SandboxAskCallback,
   FsReadRestrictionConfig,
   FsWriteRestrictionConfig,
   NetworkRestrictionConfig,
+  NetworkHostPattern,
+  SandboxConfig,
+  IgnoreViolationsConfig,
 } from './sandbox/sandbox-schemas.js'
+export { SandboxConfigSchema } from './sandbox/sandbox-schemas.js'
+
+// Platform-specific utilities
+export { hasLinuxSandboxDependenciesSync } from './sandbox/linux-sandbox-utils.js'
+export type { SandboxViolationEvent } from './sandbox/macos-sandbox-utils.js'
+
+// Utility functions
+export { getDefaultWritePaths } from './sandbox/sandbox-utils.js'
