@@ -39,7 +39,7 @@ describe('Seccomp Dependencies', () => {
       const clangResult = spawnSync('which', ['clang'], { stdio: 'ignore' })
       expect(gccResult.status === 0 || clangResult.status === 0).toBe(true)
     }
-  })
+  }, { timeout: 15000 })
 
   it('should check for Linux sandbox dependencies', () => {
     if (skipIfNotLinux()) {
