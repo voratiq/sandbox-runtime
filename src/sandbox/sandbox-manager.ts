@@ -593,7 +593,6 @@ function getLinuxGlobPatternWarnings(): string[] {
 
   // Check filesystem paths for glob patterns
   const allPaths = [
-    ...config.filesystem.allowRead,
     ...config.filesystem.denyRead,
     ...config.filesystem.allowWrite,
     ...config.filesystem.denyWrite,

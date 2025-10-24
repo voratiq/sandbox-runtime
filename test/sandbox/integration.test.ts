@@ -19,7 +19,6 @@ function createTestConfig(): SandboxRuntimeConfig {
       deniedDomains: [],
     },
     filesystem: {
-      allowRead: [],
       denyRead: [],
       allowWrite: [],
       denyWrite: [],

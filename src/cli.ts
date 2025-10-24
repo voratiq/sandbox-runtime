@@ -65,7 +65,6 @@ function getDefaultConfig(): SandboxRuntimeConfig {
       deniedDomains: [],
     },
     filesystem: {
-      allowRead: [],
       denyRead: [],
       allowWrite: [],
       denyWrite: [],

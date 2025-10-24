@@ -65,7 +65,6 @@ export const NetworkConfigSchema = z.object({
  * Filesystem configuration schema for validation
  */
 export const FilesystemConfigSchema = z.object({
-  allowRead: z.array(filesystemPathSchema).describe('Paths allowed for reading'),
   denyRead: z.array(filesystemPathSchema).describe('Paths denied for reading'),
   allowWrite: z.array(filesystemPathSchema).describe('Paths allowed for writing'),
   denyWrite: z.array(filesystemPathSchema).describe('Paths denied for writing (takes precedence over allowWrite)'),
