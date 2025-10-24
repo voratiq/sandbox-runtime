@@ -18,11 +18,9 @@ jobs:
           - arch: x86-64
             runner: ubuntu-latest
             os: linux
-          # ARM64 Linux runners (ubuntu-24.04-arm) only work in public repositories
-          # This is a private repository, so commenting out:
-          # - arch: arm64
-          #   runner: ubuntu-24.04-arm
-          #   os: linux
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            os: linux
           - arch: x86-64
             runner: macos-13
             os: macos
