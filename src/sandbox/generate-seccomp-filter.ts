@@ -145,6 +145,10 @@ export const hasSeccompDependenciesSync = memoize((): boolean => {
  *
  * Pre-generated BPF files are organized by architecture:
  * - vendor/seccomp/{x64,arm64}/unix-block.bpf
+ *
+ * Tries multiple paths for resilience:
+ * 1. ../../vendor/seccomp/{arch}/unix-block.bpf (package root - standard npm installs)
+ * 2. ../vendor/seccomp/{arch}/unix-block.bpf (dist/vendor - for bundlers)
  */
 export function getPreGeneratedBpfPath(): string | null {
 
@@ -159,27 +163,28 @@ export function getPreGeneratedBpfPath(): string | null {
 
   logForDebugging(`[SeccompFilter] Detected architecture: ${arch}`)
 
-  // Try to locate the BPF file
-  // Path is relative to the compiled code location
-  const bpfPath = join(
-    dirname(fileURLToPath(import.meta.url)),
-    '..',
-    '..',
-    'vendor',
-    'seccomp',
-    arch,
-    'unix-block.bpf',
-  )
+  // Try to locate the BPF file with fallback paths
+  // Path is relative to the compiled code location (dist/sandbox/)
+  const baseDir = dirname(fileURLToPath(import.meta.url))
+  const relativePath = join('vendor', 'seccomp', arch, 'unix-block.bpf')
 
-  if (fs.existsSync(bpfPath)) {
-    logForDebugging(
-      `[SeccompFilter] Found pre-generated BPF filter: ${bpfPath} (${arch})`,
-    )
-    return bpfPath
+  // Try paths in order of preference
+  const pathsToTry = [
+    join(baseDir, '..', '..', relativePath), // package root: vendor/seccomp/...
+    join(baseDir, '..', relativePath),       // dist: dist/vendor/seccomp/...
+  ]
+
+  for (const bpfPath of pathsToTry) {
+    if (fs.existsSync(bpfPath)) {
+      logForDebugging(
+        `[SeccompFilter] Found pre-generated BPF filter: ${bpfPath} (${arch})`,
+      )
+      return bpfPath
+    }
   }
 
   logForDebugging(
-    `[SeccompFilter] Pre-generated BPF filter not found at ${bpfPath} (${arch})`,
+    `[SeccompFilter] Pre-generated BPF filter not found in any expected location (${arch})`,
   )
   return null
 }
@@ -190,20 +195,33 @@ const CACHE_DIR = join(tmpdir(), 'claude', 'seccomp-cache')
 /**
  * Get the path to a source file in the vendor/seccomp-src directory
  * Handles both development and production paths
+ *
+ * Tries multiple paths for resilience:
+ * 1. ../../vendor/seccomp-src/{filename} (package root - standard npm installs)
+ * 2. ../vendor/seccomp-src/{filename} (dist/vendor - for bundlers)
+ *
+ * Returns the first path that exists, or the first path if none exist
  */
 function getVendorSourcePath(filename: string): string {
-  // Path is relative to the compiled code location
-  // Development: dist/sandbox/generate-seccomp-filter.js
-  // Production: node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/generate-seccomp-filter.js
-  // Source files: vendor/seccomp-src/...
-  return join(
-    dirname(fileURLToPath(import.meta.url)),
-    '..',
-    '..',
-    'vendor',
-    'seccomp-src',
-    filename,
-  )
+  // Path is relative to the compiled code location (dist/sandbox/)
+  const baseDir = dirname(fileURLToPath(import.meta.url))
+  const relativePath = join('vendor', 'seccomp-src', filename)
+
+  // Try paths in order of preference
+  const pathsToTry = [
+    join(baseDir, '..', '..', relativePath), // package root: vendor/seccomp-src/...
+    join(baseDir, '..', relativePath),       // dist: dist/vendor/seccomp-src/...
+  ]
+
+  // Return first path that exists
+  for (const path of pathsToTry) {
+    if (fs.existsSync(path)) {
+      return path
+    }
+  }
+
+  // If none exist, return first path for backward compatibility with error messages
+  return pathsToTry[0]
 }
 
 /**
