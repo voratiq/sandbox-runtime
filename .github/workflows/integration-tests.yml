@@ -71,6 +71,9 @@ jobs:
       - name: Build project
         run: npm run build
 
+      - name: Run unit tests
+        run: npm run test:unit
+
       - name: Run integration tests
         run: npm run test:integration
 

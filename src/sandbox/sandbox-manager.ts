@@ -459,11 +459,36 @@ async function reset(): Promise<void> {
       socksBridgeProcess,
     } = managerContext.linuxBridge
 
-    // Kill HTTP bridge
+    // Create array to wait for process exits
+    const exitPromises: Promise<void>[] = []
+
+    // Kill HTTP bridge and wait for it to exit
     if (httpBridgeProcess.pid && !httpBridgeProcess.killed) {
       try {
         process.kill(httpBridgeProcess.pid, 'SIGTERM')
-        logForDebugging('Killed HTTP bridge process')
+        logForDebugging('Sent SIGTERM to HTTP bridge process')
+
+        // Wait for process to exit
+        exitPromises.push(new Promise<void>((resolve) => {
+          httpBridgeProcess.once('exit', () => {
+            logForDebugging('HTTP bridge process exited')
+            resolve()
+          })
+          // Timeout after 5 seconds
+          setTimeout(() => {
+            if (!httpBridgeProcess.killed) {
+              logForDebugging('HTTP bridge did not exit, forcing SIGKILL', { level: 'warn' })
+              try {
+                if (httpBridgeProcess.pid) {
+                  process.kill(httpBridgeProcess.pid, 'SIGKILL')
+                }
+              } catch {
+                // Process may have already exited
+              }
+            }
+            resolve()
+          }, 5000)
+        }))
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
           logForDebugging(`Error killing HTTP bridge: ${err}`, {
@@ -473,11 +498,33 @@ async function reset(): Promise<void> {
       }
     }
 
-    // Kill SOCKS bridge
+    // Kill SOCKS bridge and wait for it to exit
     if (socksBridgeProcess.pid && !socksBridgeProcess.killed) {
       try {
         process.kill(socksBridgeProcess.pid, 'SIGTERM')
-        logForDebugging('Killed SOCKS bridge process')
+        logForDebugging('Sent SIGTERM to SOCKS bridge process')
+
+        // Wait for process to exit
+        exitPromises.push(new Promise<void>((resolve) => {
+          socksBridgeProcess.once('exit', () => {
+            logForDebugging('SOCKS bridge process exited')
+            resolve()
+          })
+          // Timeout after 5 seconds
+          setTimeout(() => {
+            if (!socksBridgeProcess.killed) {
+              logForDebugging('SOCKS bridge did not exit, forcing SIGKILL', { level: 'warn' })
+              try {
+                if (socksBridgeProcess.pid) {
+                  process.kill(socksBridgeProcess.pid, 'SIGKILL')
+                }
+              } catch {
+                // Process may have already exited
+              }
+            }
+            resolve()
+          }, 5000)
+        }))
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
           logForDebugging(`Error killing SOCKS bridge: ${err}`, {
@@ -486,6 +533,9 @@ async function reset(): Promise<void> {
         }
       }
     }
+
+    // Wait for both processes to exit
+    await Promise.all(exitPromises)
 
     // Clean up sockets
     if (httpSocketPath) {
