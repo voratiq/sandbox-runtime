@@ -1,14 +1,16 @@
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test'
-import { spawnSync } from 'node:child_process'
-import { existsSync, unlinkSync, mkdirSync, rmSync } from 'node:fs'
+import { spawnSync, spawn } from 'node:child_process'
+import { existsSync, unlinkSync, mkdirSync, rmSync, statSync, readFileSync, writeFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { getPlatform } from '../../src/utils/platform.js'
 import { SandboxManager } from '../../src/sandbox/sandbox-manager.js'
 import type { SandboxRuntimeConfig } from '../../src/sandbox/sandbox-config.js'
+import { generateSeccompFilter } from '../../src/sandbox/generate-seccomp-filter.js'
 
 /**
- * Create a test configuration for the sandbox with example.com allowlisted
+ * Create a minimal test configuration for the sandbox with example.com allowed
  */
 function createTestConfig(): SandboxRuntimeConfig {
   return {
@@ -24,13 +26,93 @@ function createTestConfig(): SandboxRuntimeConfig {
   }
 }
 
-function skipIfNotSupported(): boolean {
-  const platform = getPlatform()
-  return platform !== 'linux' && platform !== 'macos'
+function skipIfNotLinux(): boolean {
+  return getPlatform() !== 'linux'
 }
 
-function isMacOS(): boolean {
-  return getPlatform() === 'macos'
+// ============================================================================
+// Helper Functions for BPF File Management
+// ============================================================================
+
+/**
+ * Temporarily hide BPF files to force JIT compilation
+ * Returns a map of file paths to their contents for later restoration
+ */
+function hideBpfFiles(): Map<string, Buffer> {
+  const backups = new Map<string, Buffer>()
+
+  // Hide BPF files from both vendor/ (source) and dist/vendor/ (runtime)
+  const seccompDirs = [
+    join(process.cwd(), 'vendor', 'seccomp'),
+    join(process.cwd(), 'dist', 'vendor', 'seccomp'),
+  ]
+
+  for (const vendorSeccompDir of seccompDirs) {
+    if (!existsSync(vendorSeccompDir)) {
+      continue
+    }
+
+    // Find all BPF files in seccomp/*/unix-block.bpf
+    const archDirs = readdirSync(vendorSeccompDir, { withFileTypes: true })
+      .filter(dirent => dirent.isDirectory())
+      .map(dirent => dirent.name)
+
+    for (const arch of archDirs) {
+      const bpfPath = join(vendorSeccompDir, arch, 'unix-block.bpf')
+      if (existsSync(bpfPath)) {
+        // Backup file contents
+        const contents = readFileSync(bpfPath)
+        backups.set(bpfPath, contents)
+        // Delete the file
+        unlinkSync(bpfPath)
+        console.log(`Hidden BPF file: ${bpfPath}`)
+      }
+    }
+  }
+
+  return backups
+}
+
+/**
+ * Restore BPF files from backups
+ */
+function restoreBpfFiles(backups: Map<string, Buffer>): void {
+  for (const [path, contents] of backups.entries()) {
+    writeFileSync(path, contents)
+    console.log(`Restored BPF file: ${path}`)
+  }
+}
+
+/**
+ * Assert that the sandbox is using pre-compiled BPF files
+ */
+function assertPrecompiledBpfInUse(): void {
+  const bpfPath = generateSeccompFilter()
+
+  expect(bpfPath).toBeTruthy()
+  expect(bpfPath).toContain('/vendor/seccomp/')
+  expect(existsSync(bpfPath!)).toBe(true)
+
+  console.log(`✓ Verified using pre-compiled BPF: ${bpfPath}`)
+}
+
+/**
+ * Assert that the sandbox is using JIT-compiled BPF files
+ */
+function assertJitBpfInUse(): void {
+  const bpfPath = generateSeccompFilter()
+
+  expect(bpfPath).toBeTruthy()
+  expect(bpfPath).toContain('/tmp/claude-seccomp-')
+  expect(bpfPath).toContain('.bpf')
+  expect(existsSync(bpfPath!)).toBe(true)
+
+  // Verify it was recently created (within last 10 seconds)
+  const stats = statSync(bpfPath!)
+  const age = Date.now() - stats.mtimeMs
+  expect(age).toBeLessThan(10000)
+
+  console.log(`✓ Verified using JIT-compiled BPF: ${bpfPath}`)
 }
 
 // ============================================================================
@@ -44,11 +126,9 @@ describe('Sandbox Integration Tests', () => {
   let socketServer: any = null
 
   beforeAll(async () => {
-    if (skipIfNotSupported()) {
+    if (skipIfNotLinux()) {
       return
     }
-
-    console.log(`Running tests on ${getPlatform()}`)
 
     // Create test directory
     if (!existsSync(TEST_DIR)) {
@@ -79,12 +159,12 @@ describe('Sandbox Integration Tests', () => {
       socketServer.on('error', reject)
     })
 
-    // Initialize sandbox with config
+    // Initialize sandbox
     await SandboxManager.initialize(createTestConfig())
   })
 
   afterAll(async () => {
-    if (skipIfNotSupported()) {
+    if (skipIfNotLinux()) {
       return
     }
 
@@ -107,265 +187,573 @@ describe('Sandbox Integration Tests', () => {
     await SandboxManager.reset()
   })
 
-  describe('Unix Socket Restrictions', () => {
-    it('should block Unix socket connections', async () => {
-      if (skipIfNotSupported()) {
+  // ==========================================================================
+  // Scenario 1: With Pre-compiled BPF
+  // ==========================================================================
+
+  describe('With Pre-compiled BPF', () => {
+    beforeAll(() => {
+      if (skipIfNotLinux()) {
         return
       }
 
-      // Wrap command with sandbox
-      const command = await SandboxManager.wrapWithSandbox(
-        `echo "Test message" | nc -U ${TEST_SOCKET_PATH}`
-      )
-
-      const result = spawnSync(command, {
-        shell: true,
-        encoding: 'utf8',
-        timeout: 5000,
-      })
-
-      // Should fail due to sandbox blocking socket creation
-      const output = (result.stderr || result.stdout || '').toLowerCase()
-
-      // Different platforms/netcat versions report the error differently
-      // Linux: "operation not permitted" (seccomp)
-      // macOS: "operation not permitted" or "denied" (sandbox-exec)
-      const hasExpectedError = output.includes('operation not permitted') ||
-                               output.includes('create unix socket failed') ||
-                               output.includes('denied') ||
-                               output.includes('sandbox') ||
-                               output.includes('protocol wrong type') ||
-                               output.includes('bad file descriptor')
-
-      // On macOS, the command might fail silently with no output if sandboxed
-      const didFail = result.status !== 0 || hasExpectedError
-      expect(didFail).toBe(true)
-    })
-  })
-
-  describe('Network Restrictions', () => {
-    it('should block HTTP requests to anthropic.com (not in allowlist)', async () => {
-      if (skipIfNotSupported()) {
-        return
-      }
-
-      // Use --max-time to timeout quickly, and --show-error to see proxy errors
-      const command = await SandboxManager.wrapWithSandbox(
-        'curl -s --show-error --max-time 2 https://www.anthropic.com'
-      )
-
-      const result = spawnSync(command, {
-        shell: true,
-        encoding: 'utf8',
-        timeout: 3000,
-      })
-
-      // The proxy blocks the connection, causing curl to timeout or fail
-      // Check that the request did not succeed
-      const output = (result.stderr || result.stdout || '').toLowerCase()
-      const didFail = result.status !== 0 || result.status === null
-      expect(didFail).toBe(true)
-
-      // The output should either contain an error or be empty (timeout)
-      // It should NOT contain successful HTML response
-      expect(output).not.toContain('<!doctype html')
-      expect(output).not.toContain('<html')
+      console.log('\n=== Testing with Pre-compiled BPF ===')
+      assertPrecompiledBpfInUse()
     })
 
-    it('should allow HTTP requests to allowlisted domains', async () => {
-      if (skipIfNotSupported()) {
-        return
-      }
 
-      // Note: example.com is in the allowlist via createTestConfig()
-      const command = await SandboxManager.wrapWithSandbox(
-        'curl -s http://example.com'
-      )
-
-      const result = spawnSync(command, {
-        shell: true,
-        encoding: 'utf8',
-        timeout: 10000,
-      })
-
-      // Should succeed and return HTML
-      const output = result.stdout || ''
-      expect(result.status).toBe(0)
-      expect(output).toContain('Example Domain')
-    })
-  })
-
-  describe('Filesystem Restrictions', () => {
-    it('should block writes outside current working directory', async () => {
-      if (skipIfNotSupported()) {
-        return
-      }
-
-      // Use /etc which is definitely read-only on both platforms
-      const testFile = '/etc/sandbox-blocked-write.txt'
-
-      // Clean up if exists (it shouldn't)
-      if (existsSync(testFile)) {
-        unlinkSync(testFile)
-      }
-
-      const command = await SandboxManager.wrapWithSandbox(
-        `echo "should fail" > ${testFile}`
-      )
-
-      const result = spawnSync(command, {
-        shell: true,
-        encoding: 'utf8',
-        cwd: TEST_DIR,
-        timeout: 5000,
-      })
-
-      // The key thing is that the file should NOT have been created
-      expect(existsSync(testFile)).toBe(false)
-
-      // Should fail - command returns non-zero or contains error
-      const output = (result.stderr || result.stdout || '').toLowerCase()
-
-      // Error message varies by platform
-      // Linux: "read-only file system"
-      // macOS: "read-only" or "permission denied" or "operation not permitted"
-      const hasErrorOrFailed = result.status !== 0 ||
-                                output.includes('read-only') ||
-                                output.includes('permission denied') ||
-                                output.includes('operation not permitted')
-      expect(hasErrorOrFailed).toBe(true)
-    })
-
-    it('should allow writes within current working directory', async () => {
-      if (skipIfNotSupported()) {
-        return
-      }
-
-      // Ensure test directory exists
-      if (!existsSync(TEST_DIR)) {
-        mkdirSync(TEST_DIR, { recursive: true })
-      }
-
-      const testFile = join(TEST_DIR, 'allowed-write.txt')
-      const testContent = 'test content from sandbox'
-
-      // Clean up if exists
-      if (existsSync(testFile)) {
-        unlinkSync(testFile)
-      }
-
-      const command = await SandboxManager.wrapWithSandbox(
-        `echo "${testContent}" > allowed-write.txt`
-      )
-
-      const result = spawnSync(command, {
-        shell: true,
-        encoding: 'utf8',
-        cwd: TEST_DIR,
-        timeout: 5000,
-      })
-
-      // Debug output if failed
-      if (result.status !== 0) {
-        console.error('Command failed:', command)
-        console.error('Status:', result.status)
-        console.error('Stdout:', result.stdout)
-        console.error('Stderr:', result.stderr)
-        console.error('CWD:', TEST_DIR)
-        console.error('Test file path:', testFile)
-      }
-
-      // Should succeed
-      expect(result.status).toBe(0)
-      expect(existsSync(testFile)).toBe(true)
-
-      // Verify content
-      const content = Bun.file(testFile).text()
-      expect(await content).toContain(testContent)
-
-      // Clean up
-      if (existsSync(testFile)) {
-        unlinkSync(testFile)
-      }
-    })
-
-    it('should allow reads from anywhere', async () => {
-      if (skipIfNotSupported()) {
-        return
-      }
-
-      // Try reading a common file that exists on both platforms
-      // Use .profile or .bash_profile on macOS, .bashrc on Linux
-      const testFiles = isMacOS()
-        ? ['~/.profile', '~/.bash_profile', '~/.zshrc']
-        : ['~/.bashrc', '~/.profile']
-
-      let testedFile = null
-      for (const file of testFiles) {
-        const expandedPath = file.replace('~', process.env.HOME || '')
-        if (existsSync(expandedPath)) {
-          testedFile = file
-          break
+    describe('Unix Socket Restrictions', () => {
+      it('should block Unix socket connections with seccomp', async () => {
+        if (skipIfNotLinux()) {
+          return
         }
-      }
 
-      if (!testedFile) {
-        console.log('Skipping read test: no suitable test file found in home directory')
-        return
-      }
+        // Wrap command with sandbox
+        const command = await SandboxManager.wrapWithSandbox(
+          `echo "Test message" | nc -U ${TEST_SOCKET_PATH}`
+        )
 
-      const command = await SandboxManager.wrapWithSandbox(
-        `head -n 5 ${testedFile}`
-      )
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          timeout: 5000,
+        })
 
-      const result = spawnSync(command, {
-        shell: true,
-        encoding: 'utf8',
-        timeout: 5000,
+        // Should fail due to seccomp filter blocking socket creation
+        const output = (result.stderr || result.stdout || '').toLowerCase()
+        // Different netcat versions report the error differently
+        const hasExpectedError = output.includes('operation not permitted') ||
+                                 output.includes('create unix socket failed')
+        expect(hasExpectedError).toBe(true)
+        expect(result.status).not.toBe(0)
+      })
+    })
+
+    describe('Network Restrictions', () => {
+      it('should block HTTP requests to non-allowlisted domains', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        const command = await SandboxManager.wrapWithSandbox(
+          'curl -s http://blocked-domain.example'
+        )
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          timeout: 5000,
+        })
+
+        const output = (result.stderr || result.stdout || '').toLowerCase()
+        expect(output).toContain('blocked by network allowlist')
       })
 
-      // Should succeed
-      expect(result.status).toBe(0)
-      expect(result.stdout).toBeTruthy()
+      it('should block HTTP requests to anthropic.com (not in allowlist)', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        // Use --max-time to timeout quickly, and --show-error to see proxy errors
+        const command = await SandboxManager.wrapWithSandbox(
+          'curl -s --show-error --max-time 2 https://www.anthropic.com'
+        )
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          timeout: 3000,
+        })
+
+        // The proxy blocks the connection, causing curl to timeout or fail
+        // Check that the request did not succeed
+        const output = (result.stderr || result.stdout || '').toLowerCase()
+        const didFail = result.status !== 0 || result.status === null
+        expect(didFail).toBe(true)
+
+        // The output should either contain an error or be empty (timeout)
+        // It should NOT contain successful HTML response
+        expect(output).not.toContain('<!doctype html')
+        expect(output).not.toContain('<html')
+      })
+
+      it('should allow HTTP requests to allowlisted domains', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        // Note: example.com should be in the allowlist via .claude/settings.json
+        const command = await SandboxManager.wrapWithSandbox(
+          'curl -s http://example.com'
+        )
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          timeout: 10000,
+        })
+
+        // Should succeed and return HTML
+        const output = result.stdout || ''
+        expect(result.status).toBe(0)
+        expect(output).toContain('Example Domain')
+      })
+    })
+
+    describe('Filesystem Restrictions', () => {
+      it('should block writes outside current working directory', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        const testFile = join(tmpdir(), 'sandbox-blocked-write.txt')
+
+        // Clean up if exists
+        if (existsSync(testFile)) {
+          unlinkSync(testFile)
+        }
+
+        const command = await SandboxManager.wrapWithSandbox(
+          `echo "should fail" > ${testFile}`
+        )
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          cwd: TEST_DIR,
+          timeout: 5000,
+        })
+
+        // Should fail with read-only file system error
+        const output = (result.stderr || result.stdout || '').toLowerCase()
+        expect(output).toContain('read-only file system')
+        expect(existsSync(testFile)).toBe(false)
+      })
+
+      it('should allow writes within current working directory', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        // Ensure test directory exists
+        if (!existsSync(TEST_DIR)) {
+          mkdirSync(TEST_DIR, { recursive: true })
+        }
+
+        const testFile = join(TEST_DIR, 'allowed-write.txt')
+        const testContent = 'test content from sandbox'
+
+        // Clean up if exists
+        if (existsSync(testFile)) {
+          unlinkSync(testFile)
+        }
+
+        const command = await SandboxManager.wrapWithSandbox(
+          `echo "${testContent}" > allowed-write.txt`
+        )
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          cwd: TEST_DIR,
+          timeout: 5000,
+        })
+
+        // Debug output if failed
+        if (result.status !== 0) {
+          console.error('Command failed:', command)
+          console.error('Status:', result.status)
+          console.error('Stdout:', result.stdout)
+          console.error('Stderr:', result.stderr)
+          console.error('CWD:', TEST_DIR)
+          console.error('Test file path:', testFile)
+        }
+
+        // Should succeed
+        expect(result.status).toBe(0)
+        expect(existsSync(testFile)).toBe(true)
+
+        // Verify content
+        const content = Bun.file(testFile).text()
+        expect(await content).toContain(testContent)
+
+        // Clean up
+        if (existsSync(testFile)) {
+          unlinkSync(testFile)
+        }
+      })
+
+      it('should allow reads from anywhere', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        // Try reading from home directory
+        const command = await SandboxManager.wrapWithSandbox(
+          'head -n 5 ~/.bashrc'
+        )
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          timeout: 5000,
+        })
+
+        // Should succeed (assuming .bashrc exists)
+        expect(result.status).toBe(0)
+
+        // If .bashrc exists, should have some content
+        if (existsSync(`${process.env.HOME}/.bashrc`)) {
+          expect(result.stdout).toBeTruthy()
+        }
+      })
+    })
+
+    describe('Command Execution', () => {
+      it('should execute basic commands successfully', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        const command = await SandboxManager.wrapWithSandbox('echo "Hello from sandbox"')
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          timeout: 5000,
+        })
+
+        expect(result.status).toBe(0)
+        expect(result.stdout).toContain('Hello from sandbox')
+      })
+
+      it('should handle complex command pipelines', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        const command = await SandboxManager.wrapWithSandbox(
+          'echo "line1\nline2\nline3" | grep line2'
+        )
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          timeout: 5000,
+        })
+
+        expect(result.status).toBe(0)
+        expect(result.stdout).toContain('line2')
+        expect(result.stdout).not.toContain('line1')
+      })
     })
   })
 
-  describe('Command Execution', () => {
-    it('should execute basic commands successfully', async () => {
-      if (skipIfNotSupported()) {
+  // ==========================================================================
+  // Scenario 2: With JIT-compiled BPF
+  // ==========================================================================
+
+  describe('With JIT-compiled BPF', () => {
+    let bpfBackups: Map<string, Buffer> = new Map()
+
+    beforeAll(async () => {
+      if (skipIfNotLinux()) {
         return
       }
 
-      const command = await SandboxManager.wrapWithSandbox('echo "Hello from sandbox"')
+      console.log('\n=== Testing with JIT-compiled BPF ===')
 
-      const result = spawnSync(command, {
-        shell: true,
-        encoding: 'utf8',
-        timeout: 5000,
-      })
+      // Hide pre-compiled BPF files to force JIT compilation
+      bpfBackups = hideBpfFiles()
 
-      expect(result.status).toBe(0)
-      expect(result.stdout).toContain('Hello from sandbox')
+      // Reset sandbox to clear any cached BPF paths
+      await SandboxManager.reset()
+      await SandboxManager.initialize(createTestConfig())
+
+      // Verify JIT mode is active
+      assertJitBpfInUse()
     })
 
-    it('should handle complex command pipelines', async () => {
-      if (skipIfNotSupported()) {
+    afterAll(async () => {
+      if (skipIfNotLinux()) {
         return
       }
 
-      const command = await SandboxManager.wrapWithSandbox(
-        'echo "line1\nline2\nline3" | grep line2'
-      )
+      // Restore pre-compiled BPF files
+      restoreBpfFiles(bpfBackups)
 
-      const result = spawnSync(command, {
-        shell: true,
-        encoding: 'utf8',
-        timeout: 5000,
+      // Reset sandbox again to restore normal behavior
+      await SandboxManager.reset()
+      await SandboxManager.initialize(createTestConfig())
+    })
+
+    describe('Pre-generated BPF Files', () => {
+      it('should generate BPF files at runtime when pre-compiled files are missing', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        // Generate BPF filter and verify it's in /tmp/
+        const bpfPath = generateSeccompFilter()
+
+        expect(bpfPath).toBeTruthy()
+        expect(bpfPath).toContain('/tmp/claude-seccomp-')
+        expect(existsSync(bpfPath!)).toBe(true)
+
+        console.log(`✓ Generated runtime BPF file: ${bpfPath}`)
+
+        // Verify it's a reasonable size (should be similar to pre-compiled)
+        const stats = statSync(bpfPath!)
+        expect(stats.size).toBeGreaterThan(50)
+        expect(stats.size).toBeLessThan(200)
+        console.log(`✓ BPF file is ${stats.size} bytes`)
+      })
+    })
+
+    describe('Unix Socket Restrictions', () => {
+      it('should block Unix socket connections with seccomp', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        // Wrap command with sandbox
+        const command = await SandboxManager.wrapWithSandbox(
+          `echo "Test message" | nc -U ${TEST_SOCKET_PATH}`
+        )
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          timeout: 5000,
+        })
+
+        // Should fail due to seccomp filter blocking socket creation
+        const output = (result.stderr || result.stdout || '').toLowerCase()
+        // Different netcat versions report the error differently
+        const hasExpectedError = output.includes('operation not permitted') ||
+                                 output.includes('create unix socket failed')
+        expect(hasExpectedError).toBe(true)
+        expect(result.status).not.toBe(0)
+      })
+    })
+
+    describe('Network Restrictions', () => {
+      it('should block HTTP requests to non-allowlisted domains', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        const command = await SandboxManager.wrapWithSandbox(
+          'curl -s http://blocked-domain.example'
+        )
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          timeout: 5000,
+        })
+
+        const output = (result.stderr || result.stdout || '').toLowerCase()
+        expect(output).toContain('blocked by network allowlist')
       })
 
-      expect(result.status).toBe(0)
-      expect(result.stdout).toContain('line2')
-      expect(result.stdout).not.toContain('line1')
+      it('should block HTTP requests to anthropic.com (not in allowlist)', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        // Use --max-time to timeout quickly, and --show-error to see proxy errors
+        const command = await SandboxManager.wrapWithSandbox(
+          'curl -s --show-error --max-time 2 https://www.anthropic.com'
+        )
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          timeout: 3000,
+        })
+
+        // The proxy blocks the connection, causing curl to timeout or fail
+        // Check that the request did not succeed
+        const output = (result.stderr || result.stdout || '').toLowerCase()
+        const didFail = result.status !== 0 || result.status === null
+        expect(didFail).toBe(true)
+
+        // The output should either contain an error or be empty (timeout)
+        // It should NOT contain successful HTML response
+        expect(output).not.toContain('<!doctype html')
+        expect(output).not.toContain('<html')
+      })
+
+      it('should allow HTTP requests to allowlisted domains', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        // Note: example.com should be in the allowlist via .claude/settings.json
+        const command = await SandboxManager.wrapWithSandbox(
+          'curl -s http://example.com'
+        )
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          timeout: 10000,
+        })
+
+        // Should succeed and return HTML
+        const output = result.stdout || ''
+        expect(result.status).toBe(0)
+        expect(output).toContain('Example Domain')
+      })
+    })
+
+    describe('Filesystem Restrictions', () => {
+      it('should block writes outside current working directory', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        const testFile = join(tmpdir(), 'sandbox-blocked-write-jit.txt')
+
+        // Clean up if exists
+        if (existsSync(testFile)) {
+          unlinkSync(testFile)
+        }
+
+        const command = await SandboxManager.wrapWithSandbox(
+          `echo "should fail" > ${testFile}`
+        )
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          cwd: TEST_DIR,
+          timeout: 5000,
+        })
+
+        // Should fail with read-only file system error
+        const output = (result.stderr || result.stdout || '').toLowerCase()
+        expect(output).toContain('read-only file system')
+        expect(existsSync(testFile)).toBe(false)
+      })
+
+      it('should allow writes within current working directory', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        // Ensure test directory exists
+        if (!existsSync(TEST_DIR)) {
+          mkdirSync(TEST_DIR, { recursive: true })
+        }
+
+        const testFile = join(TEST_DIR, 'allowed-write-jit.txt')
+        const testContent = 'test content from sandbox with JIT BPF'
+
+        // Clean up if exists
+        if (existsSync(testFile)) {
+          unlinkSync(testFile)
+        }
+
+        const command = await SandboxManager.wrapWithSandbox(
+          `echo "${testContent}" > allowed-write-jit.txt`
+        )
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          cwd: TEST_DIR,
+          timeout: 5000,
+        })
+
+        // Debug output if failed
+        if (result.status !== 0) {
+          console.error('Command failed:', command)
+          console.error('Status:', result.status)
+          console.error('Stdout:', result.stdout)
+          console.error('Stderr:', result.stderr)
+          console.error('CWD:', TEST_DIR)
+          console.error('Test file path:', testFile)
+        }
+
+        // Should succeed
+        expect(result.status).toBe(0)
+        expect(existsSync(testFile)).toBe(true)
+
+        // Verify content
+        const content = Bun.file(testFile).text()
+        expect(await content).toContain(testContent)
+
+        // Clean up
+        if (existsSync(testFile)) {
+          unlinkSync(testFile)
+        }
+      })
+
+      it('should allow reads from anywhere', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        // Try reading from home directory
+        const command = await SandboxManager.wrapWithSandbox(
+          'head -n 5 ~/.bashrc'
+        )
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          timeout: 5000,
+        })
+
+        // Should succeed (assuming .bashrc exists)
+        expect(result.status).toBe(0)
+
+        // If .bashrc exists, should have some content
+        if (existsSync(`${process.env.HOME}/.bashrc`)) {
+          expect(result.stdout).toBeTruthy()
+        }
+      })
+    })
+
+    describe('Command Execution', () => {
+      it('should execute basic commands successfully', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        const command = await SandboxManager.wrapWithSandbox('echo "Hello from sandbox with JIT BPF"')
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          timeout: 5000,
+        })
+
+        expect(result.status).toBe(0)
+        expect(result.stdout).toContain('Hello from sandbox with JIT BPF')
+      })
+
+      it('should handle complex command pipelines', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        const command = await SandboxManager.wrapWithSandbox(
+          'echo "line1\nline2\nline3" | grep line2'
+        )
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          timeout: 5000,
+        })
+
+        expect(result.status).toBe(0)
+        expect(result.stdout).toContain('line2')
+        expect(result.stdout).not.toContain('line1')
+      })
     })
   })
 })

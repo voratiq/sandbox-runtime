@@ -4,10 +4,7 @@ import type { SocksProxyWrapper } from './socks-proxy.js'
 import { logForDebugging } from '../utils/debug.js'
 import { getPlatform, type Platform } from '../utils/platform.js'
 import * as fs from 'fs'
-import type {
-  SandboxRuntimeConfig,
-  IgnoreViolationsConfig,
-} from './sandbox-config.js'
+import type { SandboxRuntimeConfig } from './sandbox-config.js'
 import type {
   SandboxAskCallback,
   FsReadRestrictionConfig,
@@ -347,6 +344,10 @@ function getAllowUnixSockets(): string[] | undefined {
   return config?.network?.allowUnixSockets
 }
 
+function getAllowAllUnixSockets(): boolean | undefined {
+  return config?.network?.allowAllUnixSockets
+}
+
 function getAllowLocalBinding(): boolean | undefined {
   return config?.network?.allowLocalBinding
 }
@@ -415,6 +416,7 @@ async function wrapWithSandbox(command: string): Promise<string> {
         writeConfig: getFsWriteConfig(),
         needsNetworkRestriction: true,
         allowUnixSockets: getAllowUnixSockets(),
+        allowAllUnixSockets: getAllowAllUnixSockets(),
         allowLocalBinding: getAllowLocalBinding(),
         ignoreViolations: getIgnoreViolations(),
       })
@@ -431,6 +433,7 @@ async function wrapWithSandbox(command: string): Promise<string> {
         readConfig: getFsReadConfig(),
         writeConfig: getFsWriteConfig(),
         enableWeakerNestedSandbox: getEnableWeakerNestedSandbox(),
+        allowAllUnixSockets: getAllowAllUnixSockets(),
       })
 
     default:
@@ -456,11 +459,36 @@ async function reset(): Promise<void> {
       socksBridgeProcess,
     } = managerContext.linuxBridge
 
-    // Kill HTTP bridge
+    // Create array to wait for process exits
+    const exitPromises: Promise<void>[] = []
+
+    // Kill HTTP bridge and wait for it to exit
     if (httpBridgeProcess.pid && !httpBridgeProcess.killed) {
       try {
         process.kill(httpBridgeProcess.pid, 'SIGTERM')
-        logForDebugging('Killed HTTP bridge process')
+        logForDebugging('Sent SIGTERM to HTTP bridge process')
+
+        // Wait for process to exit
+        exitPromises.push(new Promise<void>((resolve) => {
+          httpBridgeProcess.once('exit', () => {
+            logForDebugging('HTTP bridge process exited')
+            resolve()
+          })
+          // Timeout after 5 seconds
+          setTimeout(() => {
+            if (!httpBridgeProcess.killed) {
+              logForDebugging('HTTP bridge did not exit, forcing SIGKILL', { level: 'warn' })
+              try {
+                if (httpBridgeProcess.pid) {
+                  process.kill(httpBridgeProcess.pid, 'SIGKILL')
+                }
+              } catch {
+                // Process may have already exited
+              }
+            }
+            resolve()
+          }, 5000)
+        }))
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
           logForDebugging(`Error killing HTTP bridge: ${err}`, {
@@ -470,11 +498,33 @@ async function reset(): Promise<void> {
       }
     }
 
-    // Kill SOCKS bridge
+    // Kill SOCKS bridge and wait for it to exit
     if (socksBridgeProcess.pid && !socksBridgeProcess.killed) {
       try {
         process.kill(socksBridgeProcess.pid, 'SIGTERM')
-        logForDebugging('Killed SOCKS bridge process')
+        logForDebugging('Sent SIGTERM to SOCKS bridge process')
+
+        // Wait for process to exit
+        exitPromises.push(new Promise<void>((resolve) => {
+          socksBridgeProcess.once('exit', () => {
+            logForDebugging('SOCKS bridge process exited')
+            resolve()
+          })
+          // Timeout after 5 seconds
+          setTimeout(() => {
+            if (!socksBridgeProcess.killed) {
+              logForDebugging('SOCKS bridge did not exit, forcing SIGKILL', { level: 'warn' })
+              try {
+                if (socksBridgeProcess.pid) {
+                  process.kill(socksBridgeProcess.pid, 'SIGKILL')
+                }
+              } catch {
+                // Process may have already exited
+              }
+            }
+            resolve()
+          }, 5000)
+        }))
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
           logForDebugging(`Error killing SOCKS bridge: ${err}`, {
@@ -483,6 +533,9 @@ async function reset(): Promise<void> {
         }
       }
     }
+
+    // Wait for both processes to exit
+    await Promise.all(exitPromises)
 
     // Clean up sockets
     if (httpSocketPath) {
@@ -553,7 +606,7 @@ function annotateStderrWithSandboxFailures(
   command: string,
   stderr: string,
 ): string {
-  if (!isSandboxingEnabled()) {
+  if (!config) {
     return stderr
   }
 
@@ -628,7 +681,6 @@ export interface ISandboxManager {
   getNetworkRestrictionConfig(): NetworkRestrictionConfig
   getAllowUnixSockets(): string[] | undefined
   getAllowLocalBinding(): boolean | undefined
-  getIgnoreViolations(): IgnoreViolationsConfig | undefined
   getEnableWeakerNestedSandbox(): boolean | undefined
   getProxyPort(): number | undefined
   getSocksProxyPort(): number | undefined
@@ -659,7 +711,6 @@ export const SandboxManager: ISandboxManager = {
   getNetworkRestrictionConfig,
   getAllowUnixSockets,
   getAllowLocalBinding,
-  getIgnoreViolations,
   getEnableWeakerNestedSandbox,
   getProxyPort,
   getSocksProxyPort,

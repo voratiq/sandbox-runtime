@@ -7,6 +7,7 @@ import { z } from 'zod'
 
 /**
  * Schema for domain patterns (e.g., "example.com", "*.npmjs.org")
+ * Validates that domain patterns are safe and don't include overly broad wildcards
  */
 const domainPatternSchema = z.string().refine(
   (val) => {
@@ -22,7 +23,7 @@ const domainPatternSchema = z.string().refine(
     if (val.startsWith('*.')) {
       const domain = val.slice(2)
       // After the *. there must be a valid domain with at least one more dot
-      // e.g., *.example.com is valid, *.com is not
+      // e.g., *.example.com is valid, *.com is not (too broad)
       if (!domain.includes('.') || domain.startsWith('.') || domain.endsWith('.')) {
         return false
       }
@@ -31,7 +32,7 @@ const domainPatternSchema = z.string().refine(
       return parts.length >= 2 && parts.every(p => p.length > 0)
     }
 
-    // Reject any other use of wildcards
+    // Reject any other use of wildcards (e.g., *, *., etc.)
     if (val.includes('*')) {
       return false
     }
@@ -40,7 +41,7 @@ const domainPatternSchema = z.string().refine(
     return val.includes('.') && !val.startsWith('.') && !val.endsWith('.')
   },
   {
-    message: 'Invalid domain pattern. Must be a valid domain (e.g., "example.com") or wildcard (e.g., "*.example.com")',
+    message: 'Invalid domain pattern. Must be a valid domain (e.g., "example.com") or wildcard (e.g., "*.example.com"). Overly broad patterns like "*.com" or "*" are not allowed for security reasons.',
   }
 )
 
@@ -50,7 +51,7 @@ const domainPatternSchema = z.string().refine(
 const filesystemPathSchema = z.string().min(1, 'Path cannot be empty')
 
 /**
- * Network configuration schema
+ * Network configuration schema for validation
  */
 export const NetworkConfigSchema = z.object({
   allowedDomains: z.array(domainPatternSchema).describe('List of allowed domains (e.g., ["github.com", "*.npmjs.org"])'),
@@ -61,7 +62,7 @@ export const NetworkConfigSchema = z.object({
 })
 
 /**
- * Filesystem configuration schema
+ * Filesystem configuration schema for validation
  */
 export const FilesystemConfigSchema = z.object({
   denyRead: z.array(filesystemPathSchema).describe('Paths denied for reading'),
@@ -70,7 +71,7 @@ export const FilesystemConfigSchema = z.object({
 })
 
 /**
- * Configuration for ignoring specific sandbox violations
+ * Configuration schema for ignoring specific sandbox violations
  * Maps command patterns to filesystem paths to ignore violations for.
  */
 export const IgnoreViolationsConfigSchema = z.record(
@@ -79,7 +80,7 @@ export const IgnoreViolationsConfigSchema = z.record(
 ).describe('Map of command patterns to filesystem paths to ignore violations for. Use "*" to match all commands')
 
 /**
- * Main configuration schema for Sandbox Runtime
+ * Main configuration schema for Sandbox Runtime validation
  */
 export const SandboxRuntimeConfigSchema = z.object({
   network: NetworkConfigSchema.describe('Network restrictions configuration'),
