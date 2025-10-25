@@ -165,6 +165,13 @@ function generateReadRules(
           ? staticPrefix.slice(0, -1)
           : path.dirname(staticPrefix)
 
+        // Block moves of the base directory itself
+        rules.push(
+          `(deny file-write-unlink`,
+          `  (literal ${escapePath(baseDir)})`,
+          `  (with message "${logTag}"))`,
+        )
+
         // Block moves of ancestor directories
         for (const ancestorDir of getAncestorDirectories(baseDir)) {
           rules.push(
