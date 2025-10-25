@@ -76,13 +76,17 @@ A key use case is sandboxing Model Context Protocol (MCP) servers to restrict th
 }
 ```
 
-Then configure restrictions in `~/.claude/settings.json`:
+Then configure restrictions in `~/.srt-settings.json`:
 ```json
 {
-  "permissions": {
-    "deny": [
-      "Edit(~/sensitive-folder)"
-    ]
+  "filesystem": {
+    "denyRead": [],
+    "allowWrite": ["."],
+    "denyWrite": ["~/sensitive-folder"]
+  },
+  "network": {
+    "allowedDomains": [],
+    "deniedDomains": []
   }
 }
 ```
@@ -160,17 +164,30 @@ srt echo "hello world"
 srt --debug curl https://example.com
 
 # Specify custom settings file
-srt --settings /path/to/settings.json npm install
+srt --settings /path/to/srt-settings.json npm install
 ```
 
 ### As a library
 
 ```typescript
-import { SandboxManager } from '@anthropic-ai/sandbox-runtime'
+import { SandboxManager, type SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
 import { spawn } from 'child_process'
 
+// Define your sandbox configuration
+const config: SandboxRuntimeConfig = {
+  network: {
+    allowedDomains: ['example.com', 'api.github.com'],
+    deniedDomains: []
+  },
+  filesystem: {
+    denyRead: ['~/.ssh'],
+    allowWrite: ['.', '/tmp'],
+    denyWrite: ['.env']
+  }
+}
+
 // Initialize the sandbox (starts proxy servers, etc.)
-await SandboxManager.initialize()
+await SandboxManager.initialize(config)
 
 // Wrap a command with sandbox restrictions
 const sandboxedCommand = await SandboxManager.wrapWithSandbox('curl https://example.com')
@@ -198,8 +215,11 @@ export { SandboxViolationStore } from '@anthropic-ai/sandbox-runtime'
 
 // TypeScript types
 export type {
-  SandboxAskCallback,
+  SandboxRuntimeConfig,
+  NetworkConfig,
+  FilesystemConfig,
   IgnoreViolationsConfig,
+  SandboxAskCallback,
   FsReadRestrictionConfig,
   FsWriteRestrictionConfig,
   NetworkRestrictionConfig,
@@ -208,70 +228,71 @@ export type {
 
 ## Configuration
 
-**NOTE: Configuration format is provisional and subject to change.** The current configuration system is borrowed from Claude Code's permission model and uses Claude Code settings files. This format may evolve as the sandbox runtime matures as a standalone tool.
+### Settings File Location
 
-### Settings File Locations
+By default, the sandbox runtime looks for configuration at `~/.srt-settings.json`. You can specify a custom path using the `--settings` flag:
 
-Settings are loaded and merged in priority order from:
-
-1. **User settings**: `~/.claude/settings.json`
-2. **Project settings**: `$CWD/.claude/settings.json`
-3. **Local settings**: `$CWD/.claude/settings.local.json`
-4. **Policy settings**: Platform-specific managed settings
-   - macOS: `/Library/Application Support/ClaudeCode/managed-settings.json`
-   - Linux: `/etc/claude-code/managed-settings.json`
-5. **Flag settings**: Custom path via `--settings` flag
+```bash
+srt --settings /path/to/srt-settings.json <command>
+```
 
 ### Complete Configuration Example
 
 ```json
 {
-  "sandbox": {
-    "enabled": true,
-    "network": {
-      "allowUnixSockets": ["/var/run/docker.sock"],
-      "allowLocalBinding": false,
-      "httpProxyPort": 8888,
-      "socksProxyPort": 1080
-    }
-  },
-  "permissions": {
-    "allow": [
-      "WebFetch(domain:github.com)",
-      "WebFetch(domain:lfs.github.com)",
-      "WebFetch(domain:api.github.com)",
-      "WebFetch(domain:npmjs.org)",
-      "Edit(src/)",
-      "Edit(test/)",
-      "Read(.)"
+  "network": {
+    "allowedDomains": [
+      "github.com",
+      "*.github.com",
+      "lfs.github.com",
+      "api.github.com",
+      "npmjs.org",
+      "*.npmjs.org"
     ],
-    "deny": [
-      "Edit(.env)",
-      "Edit(config/production.json)",
-      "Read(~/.ssh)",
-      "WebFetch(domain:malicious.com)"
+    "deniedDomains": [
+      "malicious.com"
+    ],
+    "allowUnixSockets": ["/var/run/docker.sock"],
+    "allowLocalBinding": false
+  },
+  "filesystem": {
+    "denyRead": [
+      "~/.ssh"
+    ],
+    "allowWrite": [
+      ".",
+      "src/",
+      "test/",
+      "/tmp"
+    ],
+    "denyWrite": [
+      ".env",
+      "config/production.json"
     ]
-  }
+  },
+  "ignoreViolations": {
+    "*": ["/usr/bin", "/System"],
+    "git push": ["/usr/bin/nc"],
+    "npm": ["/private/tmp"]
+  },
+  "enableWeakerNestedSandbox": false
 }
 ```
 
 ### Configuration Options
 
-#### Sandbox Settings
+#### Network Configuration
 
-- `sandbox.enabled` - Enable/disable sandboxing (boolean)
-- `sandbox.network.allowUnixSockets` - Unix sockets that can be accessed (array of paths)
-- `sandbox.network.allowLocalBinding` - Allow binding to local ports (boolean)
-- `sandbox.network.httpProxyPort` - Port for your own HTTP proxy (default: uses built-in proxy)
-- `sandbox.network.socksProxyPort` - Port for your own SOCKS5 proxy (default: uses built-in proxy)
+- `network.allowedDomains` - Array of allowed domains (supports wildcards like `*.example.com`)
+- `network.deniedDomains` - Array of denied domains (takes precedence over allowedDomains)
+- `network.allowUnixSockets` - Array of Unix socket paths that can be accessed (macOS only)
+- `network.allowLocalBinding` - Allow binding to local ports (boolean, default: false)
 
-#### Permission Rules
+#### Filesystem Configuration
 
-Permission rules provide fine-grained control and use Claude Code's permission syntax:
-
-- `WebFetch(domain:example.com)` - Allow/deny network access to a domain
-- `Edit(path)` - Allow/deny file write access
-- `Read(path)` - Allow/deny file read access
+- `filesystem.denyRead` - Array of paths to deny read access
+- `filesystem.allowWrite` - Array of paths to allow write access (default: current working directory only)
+- `filesystem.denyWrite` - Array of paths to deny write access (takes precedence over allowWrite)
 
 **Path Syntax (macOS):**
 
@@ -283,32 +304,44 @@ Paths support git-style glob patterns on macOS, similar to `.gitignore` syntax:
 - `[abc]` - Matches any character in the set (e.g., `file[0-9].txt` matches `file3.txt`)
 
 Examples:
-- `Edit(src/)` - Allow write to entire `src/` directory
-- `Edit(src/**/*.ts)` - Allow write to all `.ts` files in `src/` and subdirectories
-- `Read(~/.ssh)` - Deny read to SSH directory
-- `Edit(.env)` - Deny write to `.env` file (even if current directory is allowed)
+- `"allowWrite": ["src/"]` - Allow write to entire `src/` directory
+- `"allowWrite": ["src/**/*.ts"]` - Allow write to all `.ts` files in `src/` and subdirectories
+- `"denyRead": ["~/.ssh"]` - Deny read to SSH directory
+- `"denyWrite": [".env"]` - Deny write to `.env` file (even if current directory is allowed)
 
 **Path Syntax (Linux):**
 
 **Linux currently does not support glob matching.** Use literal paths only:
-- `Edit(src/)` - Allow write to `src/` directory
-- `Read(/home/user/.ssh)` - Deny read to SSH directory
+- `"allowWrite": ["src/"]` - Allow write to `src/` directory
+- `"denyRead": ["/home/user/.ssh"]` - Deny read to SSH directory
 
 **All platforms:**
 - Paths can be absolute (e.g., `/home/user/.ssh`) or relative to the current working directory (e.g., `./src`)
 - `~` expands to the user's home directory
+
+#### Other Configuration
+
+- `ignoreViolations` - Object mapping command patterns to arrays of paths where violations should be ignored
+- `enableWeakerNestedSandbox` - Enable weaker sandbox mode for Docker environments (boolean, default: false)
 
 ### Common Configuration Recipes
 
 **Allow GitHub access** (all necessary endpoints):
 ```json
 {
-  "permissions": {
-    "allow": [
-      "WebFetch(domain:github.com)",
-      "WebFetch(domain:lfs.github.com)",
-      "WebFetch(domain:api.github.com)"
-    ]
+  "network": {
+    "allowedDomains": [
+      "github.com",
+      "*.github.com",
+      "lfs.github.com",
+      "api.github.com"
+    ],
+    "deniedDomains": []
+  },
+  "filesystem": {
+    "denyRead": [],
+    "allowWrite": ["."],
+    "denyWrite": []
   }
 }
 ```
@@ -316,17 +349,14 @@ Examples:
 **Restrict to specific directories:**
 ```json
 {
-  "permissions": {
-    "allow": [
-      "Edit(src/)",
-      "Edit(test/)",
-      "Read(.)"
-    ],
-    "deny": [
-      "Edit(.env)",
-      "Edit(secrets/)",
-      "Read(~/.ssh)"
-    ]
+  "network": {
+    "allowedDomains": [],
+    "deniedDomains": []
+  },
+  "filesystem": {
+    "denyRead": ["~/.ssh"],
+    "allowWrite": [".", "src/", "test/"],
+    "denyWrite": [".env", "secrets/"]
   }
 }
 ```
@@ -357,10 +387,24 @@ Watchman accesses files outside the sandbox boundaries, which will trigger permi
   - Ubuntu/Debian: `apt-get install socat`
   - Fedora: `dnf install socat`
   - Arch: `pacman -S socat`
+- **`python3` - REQUIRED for applying seccomp filters** (typically pre-installed on Linux)
+  - Ubuntu/Debian: `apt-get install python3`
+  - Fedora: `dnf install python3`
+  - Arch: `pacman -S python`
+  - **Note:** Python 3 is mandatory for Unix socket blocking security. To disable this security feature, set `allowAllUnixSockets: true` in your configuration.
 - `ripgrep` - Fast search tool for deny path detection
   - Ubuntu/Debian: `apt-get install ripgrep`
   - Fedora: `dnf install ripgrep`
   - Arch: `pacman -S ripgrep`
+
+**Optional Linux dependencies (for seccomp fallback):**
+
+The package includes pre-generated seccomp BPF filters for x86-64 and arm architectures. These dependencies are only needed if you are on a different architecture where pre-generated filters are not available:
+- `gcc` or `clang` - C compiler
+- `libseccomp-dev` - Seccomp library development files
+  - Ubuntu/Debian: `apt-get install gcc libseccomp-dev`
+  - Fedora: `dnf install gcc libseccomp-devel`
+  - Arch: `pacman -S gcc libseccomp`
 
 **macOS requires:**
 - `ripgrep` - Fast search tool for deny path detection
@@ -376,6 +420,15 @@ npm install
 # Build the project
 npm run build
 
+# Build seccomp binaries (requires Docker)
+npm run build:seccomp
+
+# Run tests
+npm test
+
+# Run integration tests
+npm run test:integration
+
 # Type checking
 npm run typecheck
 
@@ -385,6 +438,20 @@ npm run lint
 # Format code
 npm run format
 ```
+
+### Building Seccomp Binaries
+
+The pre-generated BPF filters are included in the repository, but you can rebuild them if needed:
+
+```bash
+npm run build:seccomp
+```
+
+This script uses Docker to cross-compile seccomp binaries for multiple architectures:
+- x64 (x86-64)
+- arm64 (aarch64)
+
+The script builds static generator binaries, generates the BPF filters (~104 bytes each), and stores them in `vendor/seccomp/x64/` and `vendor/seccomp/arm64/`. The generator binaries are removed to keep the package size small.
 
 ## Implementation Details
 
@@ -419,6 +486,31 @@ Filesystem restrictions are enforced at the OS level:
   - Deny specific paths within allowed directories (e.g., deny `Edit(.env)` even though `.` is allowed)
 
 This model lets you start with broad read access but tightly controlled write access, then refine both as needed.
+
+### Unix Socket Restrictions (Linux)
+
+On Linux, the sandbox uses **seccomp BPF (Berkeley Packet Filter)** to block Unix domain socket creation at the syscall level. This provides an additional layer of security to prevent processes from creating new Unix domain sockets for local IPC (unless explicitly allowed).
+
+**How it works:**
+
+1. **Pre-generated BPF filters**: The package includes pre-compiled BPF filters for different architectures (x64, ARM64). These are ~104 bytes each and stored in `vendor/seccomp/`. The filters are architecture-specific but libc-independent, so they work with both glibc and musl.
+
+2. **Runtime detection**: The sandbox automatically detects your system's architecture and loads the appropriate pre-generated BPF filter.
+
+3. **Syscall filtering**: The BPF filter intercepts the `socket()` syscall and blocks creation of `AF_UNIX` sockets by returning `EPERM`. This prevents sandboxed code from creating new Unix domain sockets.
+
+4. **Two-stage application using Python helper script**:
+   - Outer bwrap creates the sandbox with filesystem, network, and PID namespace restrictions
+   - Network bridging processes (socat) start inside the sandbox (need Unix sockets)
+   - Python helper script (apply-seccomp-and-exec.py) applies the seccomp filter via `prctl()`
+   - Python script execs the user command with seccomp active
+   - User command runs with all sandbox restrictions plus Unix socket creation blocking
+
+**Security limitations**: The filter only blocks `socket(AF_UNIX, ...)` syscalls. It does not prevent operations on Unix socket file descriptors inherited from parent processes or passed via `SCM_RIGHTS`. For most sandboxing scenarios, blocking socket creation is sufficient to prevent unauthorized IPC.
+
+**Minimal runtime dependencies**: Unlike traditional seccomp implementations that require `gcc`, `clang`, and `libseccomp-dev` at runtime, this approach bundles pre-generated BPF filters and uses a Python helper script with standard library `ctypes` to apply them via `prctl()`, eliminating compilation dependencies for end users. Requires Python 3 (typically already installed on Linux systems).
+
+**Fallback mechanism**: If a pre-generated filter isn't available for your platform, the sandbox can fall back to runtime compilation (requires `gcc/clang` and `libseccomp-dev`).
 
 ### Violation Detection and Monitoring
 
@@ -461,16 +553,9 @@ For more sophisticated network filtering, you can configure the sandbox to use y
 ```bash
 # Start mitmproxy with custom filtering script
 mitmproxy -s custom_filter.py --listen-port 8888
-
-# Configure sandbox to use your proxy
-{
-  "sandbox": {
-    "network": {
-      "httpProxyPort": 8888
-    }
-  }
-}
 ```
+
+Note: Custom proxy configuration is not yet supported in the new configuration format. This feature will be added in a future release.
 
 **Important security consideration:** Even with domain allowlists, exfiltration vectors may exist. For example, allowing `github.com` lets a process push to any repository. With a custom MITM proxy and proper certificate setup, you can inspect and filter specific API calls to prevent this.
 

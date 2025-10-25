@@ -1,7 +1,8 @@
 import shellquote from 'shell-quote'
-import { spawn, spawnSync } from 'child_process'
+import { spawn } from 'child_process'
 import * as path from 'path'
 import { logForDebugging } from '../utils/debug.js'
+import { hasRipgrepSync } from '../utils/ripgrep.js'
 import {
   normalizePathForSandbox,
   generateProxyEnvVars,
@@ -11,13 +12,10 @@ import {
   containsGlobChars,
 } from './sandbox-utils.js'
 import type {
-  IgnoreViolationsConfig,
   FsReadRestrictionConfig,
   FsWriteRestrictionConfig,
 } from './sandbox-schemas.js'
-
-// Cache for macOS sandbox dependencies check
-let macosDepsCache: boolean | undefined
+import type { IgnoreViolationsConfig } from './sandbox-config.js'
 
 /**
  * Check if macOS sandbox dependencies are available (synchronous)
@@ -25,22 +23,7 @@ let macosDepsCache: boolean | undefined
  * Cached to avoid repeated system calls
  */
 export function hasMacOSSandboxDependenciesSync(): boolean {
-  if (macosDepsCache !== undefined) {
-    return macosDepsCache
-  }
-
-  try {
-    const rgResult = spawnSync('which', ['rg'], {
-      stdio: 'ignore',
-      timeout: 1000,
-    })
-
-    macosDepsCache = rgResult.status === 0
-    return macosDepsCache
-  } catch {
-    macosDepsCache = false
-    return false
-  }
+  return hasRipgrepSync()
 }
 
 export interface MacOSSandboxParams {
@@ -49,6 +32,7 @@ export interface MacOSSandboxParams {
   socksProxyPort?: number
   needsNetworkRestriction: boolean
   allowUnixSockets?: string[]
+  allowAllUnixSockets?: boolean
   allowLocalBinding?: boolean
   readConfig: FsReadRestrictionConfig | undefined
   writeConfig: FsWriteRestrictionConfig | undefined
@@ -305,6 +289,7 @@ async function generateSandboxProfile({
   socksProxyPort,
   needsNetworkRestriction,
   allowUnixSockets,
+  allowAllUnixSockets,
   allowLocalBinding,
   logTag,
 }: {
@@ -314,6 +299,7 @@ async function generateSandboxProfile({
   socksProxyPort?: number
   needsNetworkRestriction: boolean
   allowUnixSockets?: string[]
+  allowAllUnixSockets?: boolean
   allowLocalBinding?: boolean
   logTag: string
 }): Promise<string> {
@@ -473,14 +459,17 @@ async function generateSandboxProfile({
       profile.push('(allow network-outbound (local ip "localhost:*"))')
     }
     // Unix domain sockets for local IPC (SSH agent, Docker, etc.)
-    if (allowUnixSockets && allowUnixSockets.length > 0) {
+    if (allowAllUnixSockets) {
+      // Allow all Unix socket paths
+      profile.push('(allow network* (subpath "/"))')
+    } else if (allowUnixSockets && allowUnixSockets.length > 0) {
       // Allow specific Unix socket paths
       for (const socketPath of allowUnixSockets) {
         const normalizedPath = normalizePathForSandbox(socketPath)
         profile.push(`(allow network* (subpath ${escapePath(normalizedPath)}))`)
       }
     }
-    // If allowUnixSockets is undefined or empty array, Unix sockets are blocked by default
+    // If both allowAllUnixSockets and allowUnixSockets are false/undefined/empty, Unix sockets are blocked by default
 
     // Allow localhost TCP operations for the HTTP proxy
     if (httpProxyPort !== undefined) {
@@ -566,6 +555,7 @@ export async function wrapCommandWithSandboxMacOS(
     socksProxyPort,
     needsNetworkRestriction,
     allowUnixSockets,
+    allowAllUnixSockets,
     allowLocalBinding,
     readConfig,
     writeConfig,
@@ -585,6 +575,7 @@ export async function wrapCommandWithSandboxMacOS(
     socksProxyPort,
     needsNetworkRestriction,
     allowUnixSockets,
+    allowAllUnixSockets,
     allowLocalBinding,
     logTag,
   })
