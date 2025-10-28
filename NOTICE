@@ -1,0 +1,11 @@
+Voratiq Sandbox Runtime
+Copyright (c) 2025 Voratiq
+
+This distribution includes substantial portions of the Anthropic Sandbox Runtime,
+which is Copyright (c) 2025 Anthropic PBC and licensed under the Apache License,
+Version 2.0. The original project is available at
+https://github.com/anthropic-experimental/sandbox-runtime.
+
+This software may include third-party components distributed under their own
+licenses. See `package.json` and the accompanying license files in the vendor
+directory for additional details.
