@@ -38,7 +38,7 @@ function getVendorArchitecture(): string | null {
       // Until then, 32-bit x86 is not supported to avoid a security bypass.
       logForDebugging(
         `[SeccompFilter] 32-bit x86 (ia32) is not currently supported due to missing socketcall() syscall blocking. ` +
-        `The current seccomp filter only blocks socket(AF_UNIX, ...), but on 32-bit x86, socketcall() can be used to bypass this.`,
+          `The current seccomp filter only blocks socket(AF_UNIX, ...), but on 32-bit x86, socketcall() can be used to bypass this.`,
         { level: 'error' },
       )
       return null
@@ -151,7 +151,6 @@ export const hasSeccompDependenciesSync = memoize((): boolean => {
  * 2. ../vendor/seccomp/{arch}/unix-block.bpf (dist/vendor - for bundlers)
  */
 export function getPreGeneratedBpfPath(): string | null {
-
   // Determine architecture
   const arch = getVendorArchitecture()
   if (!arch) {
@@ -171,7 +170,7 @@ export function getPreGeneratedBpfPath(): string | null {
   // Try paths in order of preference
   const pathsToTry = [
     join(baseDir, '..', '..', relativePath), // package root: vendor/seccomp/...
-    join(baseDir, '..', relativePath),       // dist: dist/vendor/seccomp/...
+    join(baseDir, '..', relativePath), // dist: dist/vendor/seccomp/...
   ]
 
   for (const bpfPath of pathsToTry) {
@@ -210,7 +209,7 @@ function getVendorSourcePath(filename: string): string {
   // Try paths in order of preference
   const pathsToTry = [
     join(baseDir, '..', '..', relativePath), // package root: vendor/seccomp-src/...
-    join(baseDir, '..', relativePath),       // dist: dist/vendor/seccomp-src/...
+    join(baseDir, '..', relativePath), // dist: dist/vendor/seccomp-src/...
   ]
 
   // Return first path that exists
@@ -233,10 +232,9 @@ function readVendorSource(filename: string): string | null {
 
   try {
     if (!fs.existsSync(sourcePath)) {
-      logForDebugging(
-        `[SeccompFilter] Source file not found: ${sourcePath}`,
-        { level: 'warn' },
-      )
+      logForDebugging(`[SeccompFilter] Source file not found: ${sourcePath}`, {
+        level: 'warn',
+      })
       return null
     }
 
@@ -259,20 +257,14 @@ function getFilterGeneratorSourceHash(): string {
     // Fallback hash if source file is missing
     return 'missing'
   }
-  return createHash('sha256')
-    .update(source)
-    .digest('hex')
-    .substring(0, 16)
+  return createHash('sha256').update(source).digest('hex').substring(0, 16)
 }
 
 /**
  * Write C source code to a temporary file
  * Returns the path to the temporary source file, or null on failure
  */
-function writeSourceToTempFile(
-  name: string,
-  hash: string,
-): string | null {
+function writeSourceToTempFile(name: string, hash: string): string | null {
   const sourcePath = join(CACHE_DIR, `${name}-${hash}.c`)
 
   // Check if source file already exists (cached)
@@ -458,7 +450,9 @@ export function generateSeccompFilter(): string | null {
     return null
   }
 
-  logForDebugging('[SeccompFilter] Successfully generated BPF filter via runtime compilation')
+  logForDebugging(
+    '[SeccompFilter] Successfully generated BPF filter via runtime compilation',
+  )
   return filterPath
 }
 
@@ -467,10 +461,11 @@ export function generateSeccompFilter(): string | null {
  * Note: Pre-generated BPF files from vendor/ are never deleted
  */
 export function cleanupSeccompFilter(filterPath: string): void {
-
   // Don't delete pre-generated BPF files from vendor/
   if (filterPath.includes('/vendor/seccomp/')) {
-    logForDebugging('[SeccompFilter] Skipping cleanup of pre-generated BPF file')
+    logForDebugging(
+      '[SeccompFilter] Skipping cleanup of pre-generated BPF file',
+    )
     return
   }
 
@@ -496,10 +491,7 @@ function getApplySeccompScriptHash(): string {
     // Fallback hash if source file is missing
     return 'missing'
   }
-  return createHash('sha256')
-    .update(source)
-    .digest('hex')
-    .substring(0, 16)
+  return createHash('sha256').update(source).digest('hex').substring(0, 16)
 }
 
 /**
@@ -536,7 +528,9 @@ function writeApplySeccompScript(): string | null {
       mode: 0o755, // Make executable
     })
 
-    logForDebugging(`[SeccompFilter] Wrote apply-seccomp Python script to ${scriptPath}`)
+    logForDebugging(
+      `[SeccompFilter] Wrote apply-seccomp Python script to ${scriptPath}`,
+    )
     return scriptPath
   } catch (err) {
     logForDebugging(
