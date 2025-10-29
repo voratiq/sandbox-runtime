@@ -79,7 +79,9 @@ function registerSeccompCleanupHandler(): void {
  * - On x64/arm64: Only Python 3 is required (pre-generated BPF filters available)
  * - On other architectures: gcc/clang and libseccomp-dev are required for runtime compilation
  */
-export function hasLinuxSandboxDependenciesSync(allowAllUnixSockets = false): boolean {
+export function hasLinuxSandboxDependenciesSync(
+  allowAllUnixSockets = false,
+): boolean {
   try {
     const bwrapResult = spawnSync('which', ['bwrap'], {
       stdio: 'ignore',

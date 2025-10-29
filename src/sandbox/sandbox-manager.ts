@@ -2,6 +2,7 @@ import { createHttpProxyServer } from './http-proxy.js'
 import { createSocksProxyServer } from './socks-proxy.js'
 import type { SocksProxyWrapper } from './socks-proxy.js'
 import { logForDebugging } from '../utils/debug.js'
+import type { TelemetrySandboxVerdict } from '../utils/telemetry.js'
 import { getPlatform, type Platform } from '../utils/platform.js'
 import * as fs from 'fs'
 import type { SandboxRuntimeConfig } from './sandbox-config.js'
@@ -79,21 +80,44 @@ function matchesDomainPattern(hostname: string, pattern: string): boolean {
   return hostname.toLowerCase() === pattern.toLowerCase()
 }
 
+interface NetworkFilterDecision {
+  allowed: boolean
+  verdict: TelemetrySandboxVerdict
+}
+
+function createNetworkVerdict(
+  decision: 'allow' | 'deny',
+  reason: string,
+  policyTag = 'network.allowlist',
+): TelemetrySandboxVerdict {
+  return {
+    decision,
+    reason,
+    policy_tag: policyTag,
+  }
+}
+
 async function filterNetworkRequest(
   port: number,
   host: string,
   sandboxAskCallback?: SandboxAskCallback,
-): Promise<boolean> {
+): Promise<NetworkFilterDecision> {
   if (!config) {
     logForDebugging('No config available, denying network request')
-    return false
+    return {
+      allowed: false,
+      verdict: createNetworkVerdict('deny', 'runtime_config_missing'),
+    }
   }
 
   // Check denied domains first
   for (const deniedDomain of config.network.deniedDomains) {
     if (matchesDomainPattern(host, deniedDomain)) {
       logForDebugging(`Denied by config rule: ${host}:${port}`)
-      return false
+      return {
+        allowed: false,
+        verdict: createNetworkVerdict('deny', `denylist:${deniedDomain}`),
+      }
     }
   }
 
@@ -101,14 +125,20 @@ async function filterNetworkRequest(
   for (const allowedDomain of config.network.allowedDomains) {
     if (matchesDomainPattern(host, allowedDomain)) {
       logForDebugging(`Allowed by config rule: ${host}:${port}`)
-      return true
+      return {
+        allowed: true,
+        verdict: createNetworkVerdict('allow', `allowlist:${allowedDomain}`),
+      }
     }
   }
 
   // No matching rules - ask user or deny
   if (!sandboxAskCallback) {
     logForDebugging(`No matching config rule, denying: ${host}:${port}`)
-    return false
+    return {
+      allowed: false,
+      verdict: createNetworkVerdict('deny', 'no_matching_rule'),
+    }
   }
 
   logForDebugging(`No matching config rule, asking user: ${host}:${port}`)
@@ -116,16 +146,25 @@ async function filterNetworkRequest(
     const userAllowed = await sandboxAskCallback({ host, port })
     if (userAllowed) {
       logForDebugging(`User allowed: ${host}:${port}`)
-      return true
+      return {
+        allowed: true,
+        verdict: createNetworkVerdict('allow', 'user_override'),
+      }
     } else {
       logForDebugging(`User denied: ${host}:${port}`)
-      return false
+      return {
+        allowed: false,
+        verdict: createNetworkVerdict('deny', 'user_override_denied'),
+      }
     }
   } catch (error) {
     logForDebugging(`Error in permission callback: ${error}`, {
       level: 'error',
     })
-    return false
+    return {
+      allowed: false,
+      verdict: createNetworkVerdict('deny', 'callback_error'),
+    }
   }
 }
 
@@ -267,7 +306,6 @@ function isSandboxingEnabled(): boolean {
   // Sandboxing is enabled if config has been set (via initialize())
   return config !== undefined
 }
-
 
 function getFsReadConfig(): FsReadRestrictionConfig {
   if (!config) {
@@ -469,26 +507,30 @@ async function reset(): Promise<void> {
         logForDebugging('Sent SIGTERM to HTTP bridge process')
 
         // Wait for process to exit
-        exitPromises.push(new Promise<void>((resolve) => {
-          httpBridgeProcess.once('exit', () => {
-            logForDebugging('HTTP bridge process exited')
-            resolve()
-          })
-          // Timeout after 5 seconds
-          setTimeout(() => {
-            if (!httpBridgeProcess.killed) {
-              logForDebugging('HTTP bridge did not exit, forcing SIGKILL', { level: 'warn' })
-              try {
-                if (httpBridgeProcess.pid) {
-                  process.kill(httpBridgeProcess.pid, 'SIGKILL')
+        exitPromises.push(
+          new Promise<void>(resolve => {
+            httpBridgeProcess.once('exit', () => {
+              logForDebugging('HTTP bridge process exited')
+              resolve()
+            })
+            // Timeout after 5 seconds
+            setTimeout(() => {
+              if (!httpBridgeProcess.killed) {
+                logForDebugging('HTTP bridge did not exit, forcing SIGKILL', {
+                  level: 'warn',
+                })
+                try {
+                  if (httpBridgeProcess.pid) {
+                    process.kill(httpBridgeProcess.pid, 'SIGKILL')
+                  }
+                } catch {
+                  // Process may have already exited
                 }
-              } catch {
-                // Process may have already exited
               }
-            }
-            resolve()
-          }, 5000)
-        }))
+              resolve()
+            }, 5000)
+          }),
+        )
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
           logForDebugging(`Error killing HTTP bridge: ${err}`, {
@@ -505,26 +547,30 @@ async function reset(): Promise<void> {
         logForDebugging('Sent SIGTERM to SOCKS bridge process')
 
         // Wait for process to exit
-        exitPromises.push(new Promise<void>((resolve) => {
-          socksBridgeProcess.once('exit', () => {
-            logForDebugging('SOCKS bridge process exited')
-            resolve()
-          })
-          // Timeout after 5 seconds
-          setTimeout(() => {
-            if (!socksBridgeProcess.killed) {
-              logForDebugging('SOCKS bridge did not exit, forcing SIGKILL', { level: 'warn' })
-              try {
-                if (socksBridgeProcess.pid) {
-                  process.kill(socksBridgeProcess.pid, 'SIGKILL')
+        exitPromises.push(
+          new Promise<void>(resolve => {
+            socksBridgeProcess.once('exit', () => {
+              logForDebugging('SOCKS bridge process exited')
+              resolve()
+            })
+            // Timeout after 5 seconds
+            setTimeout(() => {
+              if (!socksBridgeProcess.killed) {
+                logForDebugging('SOCKS bridge did not exit, forcing SIGKILL', {
+                  level: 'warn',
+                })
+                try {
+                  if (socksBridgeProcess.pid) {
+                    process.kill(socksBridgeProcess.pid, 'SIGKILL')
+                  }
+                } catch {
+                  // Process may have already exited
                 }
-              } catch {
-                // Process may have already exited
               }
-            }
-            resolve()
-          }, 5000)
-        }))
+              resolve()
+            }, 5000)
+          }),
+        )
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
           logForDebugging(`Error killing SOCKS bridge: ${err}`, {
