@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { getPlatform } from '../../src/utils/platform.js'
 import { wrapCommandWithSandboxMacOS } from '../../src/sandbox/macos-sandbox-utils.js'
-import type { FsReadRestrictionConfig } from '../../src/sandbox/sandbox-schemas.js'
+import type { FsReadRestrictionConfig, FsWriteRestrictionConfig } from '../../src/sandbox/sandbox-schemas.js'
 
 /**
  * Tests for macOS Seatbelt read bypass vulnerability
@@ -363,6 +363,353 @@ describe('macOS Seatbelt Read Bypass Prevention', () => {
       })
 
       // Execute the wrapped command
+      const result = spawnSync(wrappedCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // The move should fail
+      expect(result.status).not.toBe(0)
+      const output = (result.stderr || '').toLowerCase()
+      expect(output).toContain('operation not permitted')
+
+      // Verify the file was NOT moved
+      expect(existsSync(nestedFile)).toBe(true)
+      expect(existsSync(movedNested)).toBe(false)
+    })
+  })
+})
+
+describe('macOS Seatbelt Write Bypass Prevention', () => {
+  const TEST_BASE_DIR = join(tmpdir(), 'seatbelt-write-test-' + Date.now())
+  const TEST_ALLOWED_DIR = join(TEST_BASE_DIR, 'allowed')
+  const TEST_DENIED_DIR = join(TEST_ALLOWED_DIR, 'secrets')
+  const TEST_DENIED_FILE = join(TEST_DENIED_DIR, 'secret.txt')
+  const TEST_ORIGINAL_CONTENT = 'ORIGINAL_CONTENT'
+  const TEST_MODIFIED_CONTENT = 'MODIFIED_CONTENT'
+
+  // Additional test paths
+  const TEST_RENAMED_DIR = join(TEST_BASE_DIR, 'renamed-secrets')
+  const TEST_RENAMED_FILE = join(TEST_RENAMED_DIR, 'secret.txt')
+
+  // Glob pattern test paths
+  const TEST_GLOB_DIR = join(TEST_ALLOWED_DIR, 'glob-test')
+  const TEST_GLOB_SECRET1 = join(TEST_GLOB_DIR, 'secret1.txt')
+  const TEST_GLOB_SECRET2 = join(TEST_GLOB_DIR, 'secret2.log')
+  const TEST_GLOB_RENAMED = join(TEST_BASE_DIR, 'renamed-glob')
+
+  beforeAll(() => {
+    if (skipIfNotMacOS()) {
+      return
+    }
+
+    // Create test directory structure
+    mkdirSync(TEST_DENIED_DIR, { recursive: true })
+    mkdirSync(TEST_GLOB_DIR, { recursive: true })
+
+    // Create test files with original content
+    writeFileSync(TEST_DENIED_FILE, TEST_ORIGINAL_CONTENT)
+    writeFileSync(TEST_GLOB_SECRET1, TEST_ORIGINAL_CONTENT)
+    writeFileSync(TEST_GLOB_SECRET2, TEST_ORIGINAL_CONTENT)
+  })
+
+  afterAll(() => {
+    if (skipIfNotMacOS()) {
+      return
+    }
+
+    // Clean up test directory
+    if (existsSync(TEST_BASE_DIR)) {
+      rmSync(TEST_BASE_DIR, { recursive: true, force: true })
+    }
+  })
+
+  describe('Literal Path - Direct Directory Move Prevention', () => {
+    it('should block write bypass via directory rename (mv a c, write c/b, mv c a)', async () => {
+      if (skipIfNotMacOS()) {
+        return
+      }
+
+      // Allow writing to TEST_ALLOWED_DIR but deny TEST_DENIED_DIR
+      const writeConfig: FsWriteRestrictionConfig = {
+        allowOnly: [TEST_ALLOWED_DIR],
+        denyWithinAllow: [TEST_DENIED_DIR]
+      }
+
+      // Step 1: Try to rename the denied directory
+      const mvCommand1 = await wrapCommandWithSandboxMacOS({
+        command: `mv ${TEST_DENIED_DIR} ${TEST_RENAMED_DIR}`,
+        needsNetworkRestriction: false,
+        readConfig: undefined,
+        writeConfig,
+      })
+
+      const result1 = spawnSync(mvCommand1, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // The move should fail
+      expect(result1.status).not.toBe(0)
+      const output1 = (result1.stderr || '').toLowerCase()
+      expect(output1).toContain('operation not permitted')
+
+      // Verify the directory was NOT moved
+      expect(existsSync(TEST_DENIED_DIR)).toBe(true)
+      expect(existsSync(TEST_RENAMED_DIR)).toBe(false)
+    })
+
+    it('should still block direct writes to denied paths (sanity check)', async () => {
+      if (skipIfNotMacOS()) {
+        return
+      }
+
+      const writeConfig: FsWriteRestrictionConfig = {
+        allowOnly: [TEST_ALLOWED_DIR],
+        denyWithinAllow: [TEST_DENIED_DIR]
+      }
+
+      // Try to write directly to the denied file
+      const wrappedCommand = await wrapCommandWithSandboxMacOS({
+        command: `echo "${TEST_MODIFIED_CONTENT}" > ${TEST_DENIED_FILE}`,
+        needsNetworkRestriction: false,
+        readConfig: undefined,
+        writeConfig,
+      })
+
+      const result = spawnSync(wrappedCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // The write should fail
+      expect(result.status).not.toBe(0)
+      const output = (result.stderr || '').toLowerCase()
+      expect(output).toContain('operation not permitted')
+
+      // Verify the file was NOT modified
+      const content = readFileSync(TEST_DENIED_FILE, 'utf8')
+      expect(content).toBe(TEST_ORIGINAL_CONTENT)
+    })
+  })
+
+  describe('Literal Path - Ancestor Directory Move Prevention', () => {
+    it('should block moving an ancestor directory of a write-denied path', async () => {
+      if (skipIfNotMacOS()) {
+        return
+      }
+
+      const writeConfig: FsWriteRestrictionConfig = {
+        allowOnly: [TEST_ALLOWED_DIR],
+        denyWithinAllow: [TEST_DENIED_FILE]
+      }
+
+      const movedAllowedDir = join(TEST_BASE_DIR, 'moved-allowed')
+
+      // Try to move the parent directory (TEST_ALLOWED_DIR)
+      const wrappedCommand = await wrapCommandWithSandboxMacOS({
+        command: `mv ${TEST_ALLOWED_DIR} ${movedAllowedDir}`,
+        needsNetworkRestriction: false,
+        readConfig: undefined,
+        writeConfig,
+      })
+
+      const result = spawnSync(wrappedCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // The move should fail because TEST_ALLOWED_DIR is an ancestor
+      expect(result.status).not.toBe(0)
+      const output = (result.stderr || '').toLowerCase()
+      expect(output).toContain('operation not permitted')
+
+      // Verify the directory was NOT moved
+      expect(existsSync(TEST_ALLOWED_DIR)).toBe(true)
+      expect(existsSync(movedAllowedDir)).toBe(false)
+    })
+
+    it('should block moving the grandparent directory', async () => {
+      if (skipIfNotMacOS()) {
+        return
+      }
+
+      const writeConfig: FsWriteRestrictionConfig = {
+        allowOnly: [TEST_ALLOWED_DIR],
+        denyWithinAllow: [TEST_DENIED_FILE]
+      }
+
+      const movedBaseDir = join(tmpdir(), 'moved-write-base-' + Date.now())
+
+      // Try to move the grandparent directory (TEST_BASE_DIR)
+      const wrappedCommand = await wrapCommandWithSandboxMacOS({
+        command: `mv ${TEST_BASE_DIR} ${movedBaseDir}`,
+        needsNetworkRestriction: false,
+        readConfig: undefined,
+        writeConfig,
+      })
+
+      const result = spawnSync(wrappedCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // The move should fail because TEST_BASE_DIR is an ancestor
+      expect(result.status).not.toBe(0)
+      const output = (result.stderr || '').toLowerCase()
+      expect(output).toContain('operation not permitted')
+
+      // Verify the directory was NOT moved
+      expect(existsSync(TEST_BASE_DIR)).toBe(true)
+      expect(existsSync(movedBaseDir)).toBe(false)
+    })
+  })
+
+  describe('Glob Pattern - File Move Prevention', () => {
+    it('should block write bypass via moving glob-matched files', async () => {
+      if (skipIfNotMacOS()) {
+        return
+      }
+
+      // Allow writing to TEST_ALLOWED_DIR but deny *.txt files in glob-test
+      const globPattern = join(TEST_GLOB_DIR, '*.txt')
+
+      const writeConfig: FsWriteRestrictionConfig = {
+        allowOnly: [TEST_ALLOWED_DIR],
+        denyWithinAllow: [globPattern]
+      }
+
+      // Try to move a .txt file
+      const mvCommand = await wrapCommandWithSandboxMacOS({
+        command: `mv ${TEST_GLOB_SECRET1} ${join(TEST_BASE_DIR, 'moved-secret.txt')}`,
+        needsNetworkRestriction: false,
+        readConfig: undefined,
+        writeConfig,
+      })
+
+      const result = spawnSync(mvCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // The move should fail
+      expect(result.status).not.toBe(0)
+      const output = (result.stderr || '').toLowerCase()
+      expect(output).toContain('operation not permitted')
+
+      // Verify the file was NOT moved
+      expect(existsSync(TEST_GLOB_SECRET1)).toBe(true)
+    })
+
+    it('should still block direct writes to glob-matched files', async () => {
+      if (skipIfNotMacOS()) {
+        return
+      }
+
+      const globPattern = join(TEST_GLOB_DIR, '*.txt')
+
+      const writeConfig: FsWriteRestrictionConfig = {
+        allowOnly: [TEST_ALLOWED_DIR],
+        denyWithinAllow: [globPattern]
+      }
+
+      // Try to write to a glob-matched file
+      const wrappedCommand = await wrapCommandWithSandboxMacOS({
+        command: `echo "${TEST_MODIFIED_CONTENT}" > ${TEST_GLOB_SECRET1}`,
+        needsNetworkRestriction: false,
+        readConfig: undefined,
+        writeConfig,
+      })
+
+      const result = spawnSync(wrappedCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // The write should fail
+      expect(result.status).not.toBe(0)
+      const output = (result.stderr || '').toLowerCase()
+      expect(output).toContain('operation not permitted')
+
+      // Verify the file was NOT modified
+      const content = readFileSync(TEST_GLOB_SECRET1, 'utf8')
+      expect(content).toBe(TEST_ORIGINAL_CONTENT)
+    })
+
+    it('should block moving the parent directory containing glob-matched files', async () => {
+      if (skipIfNotMacOS()) {
+        return
+      }
+
+      const globPattern = join(TEST_GLOB_DIR, '*.txt')
+
+      const writeConfig: FsWriteRestrictionConfig = {
+        allowOnly: [TEST_ALLOWED_DIR],
+        denyWithinAllow: [globPattern]
+      }
+
+      // Try to move the parent directory
+      const wrappedCommand = await wrapCommandWithSandboxMacOS({
+        command: `mv ${TEST_GLOB_DIR} ${TEST_GLOB_RENAMED}`,
+        needsNetworkRestriction: false,
+        readConfig: undefined,
+        writeConfig,
+      })
+
+      const result = spawnSync(wrappedCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // The move should fail
+      expect(result.status).not.toBe(0)
+      const output = (result.stderr || '').toLowerCase()
+      expect(output).toContain('operation not permitted')
+
+      // Verify the directory was NOT moved
+      expect(existsSync(TEST_GLOB_DIR)).toBe(true)
+      expect(existsSync(TEST_GLOB_RENAMED)).toBe(false)
+    })
+  })
+
+  describe('Glob Pattern - Recursive Patterns', () => {
+    it('should block moving files matching a recursive glob pattern (**/*.txt)', async () => {
+      if (skipIfNotMacOS()) {
+        return
+      }
+
+      // Create nested directory structure
+      const nestedDir = join(TEST_GLOB_DIR, 'nested')
+      const nestedFile = join(nestedDir, 'nested-secret.txt')
+      mkdirSync(nestedDir, { recursive: true })
+      writeFileSync(nestedFile, TEST_ORIGINAL_CONTENT)
+
+      // Use recursive glob pattern
+      const globPattern = join(TEST_GLOB_DIR, '**/*.txt')
+
+      const writeConfig: FsWriteRestrictionConfig = {
+        allowOnly: [TEST_ALLOWED_DIR],
+        denyWithinAllow: [globPattern]
+      }
+
+      const movedNested = join(TEST_BASE_DIR, 'moved-nested.txt')
+
+      // Try to move the nested file
+      const wrappedCommand = await wrapCommandWithSandboxMacOS({
+        command: `mv ${nestedFile} ${movedNested}`,
+        needsNetworkRestriction: false,
+        readConfig: undefined,
+        writeConfig,
+      })
+
       const result = spawnSync(wrappedCommand, {
         shell: true,
         encoding: 'utf8',
