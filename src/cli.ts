@@ -17,6 +17,10 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import { performance } from 'node:perf_hooks'
+import { createRequire } from 'module'
+
+const require = createRequire(import.meta.url)
+const { version } = require('../package.json') as { version: string }
 
 /**
  * Load and validate sandbox configuration from a file
@@ -90,7 +94,7 @@ async function main(): Promise<void> {
     .description(
       'Run commands in a sandbox with network and filesystem restrictions',
     )
-    .version('1.0.0')
+    .version(version)
 
   // Default command - run command in sandbox
   program
