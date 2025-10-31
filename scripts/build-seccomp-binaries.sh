@@ -50,15 +50,18 @@ build_platform() {
 
     local output_dir="$ROOT_DIR/vendor/seccomp/$vendor_dir"
     local bpf_file="$output_dir/unix-block.bpf"
+    local apply_seccomp_bin="$output_dir/apply-seccomp"
 
     echo ""
     echo "=========================================="
     echo "Building for: $vendor_dir ($docker_platform)"
     echo "=========================================="
 
-    # Check if BPF file already exists
-    if [ -f "$bpf_file" ]; then
-        echo "⊙ BPF file already exists, skipping build: $bpf_file ($(ls -lh "$bpf_file" | awk '{print $5}'))"
+    # Check if both BPF file and apply-seccomp binary already exist
+    if [ -f "$bpf_file" ] && [ -f "$apply_seccomp_bin" ]; then
+        echo "⊙ Files already exist, skipping build:"
+        echo "  - BPF filter: $bpf_file ($(ls -lh "$bpf_file" | awk '{print $5}'))"
+        echo "  - apply-seccomp: $apply_seccomp_bin ($(ls -lh "$apply_seccomp_bin" | awk '{print $5}'))"
         return 0
     fi
 
@@ -95,6 +98,27 @@ build_platform() {
 
             echo 'Binary size:'
             ls -lh /output/seccomp-unix-block
+
+            echo ''
+            echo 'Building apply-seccomp (no libseccomp dependency)...'
+            gcc -o /output/apply-seccomp /src/apply-seccomp.c \
+                -static \
+                -O2 -Wall -Wextra
+
+            echo 'Stripping apply-seccomp...'
+            strip /output/apply-seccomp
+
+            echo 'Setting permissions...'
+            chmod +x /output/apply-seccomp
+
+            echo 'Verifying apply-seccomp binary...'
+            file /output/apply-seccomp
+
+            echo 'Testing static linkage...'
+            ldd /output/apply-seccomp 2>&1 || echo '(static binary - no dynamic dependencies)'
+
+            echo 'Binary size:'
+            ls -lh /output/apply-seccomp
         " || {
             echo "Error: Build failed for $vendor_dir"
             return 1
@@ -129,11 +153,18 @@ build_platform() {
     rm -f "$output_dir/seccomp-unix-block"
 
     # Verify final state
-    if [ -f "$bpf_file" ]; then
-        echo "✓ Success: BPF filter ready for $vendor_dir"
+    if [ -f "$bpf_file" ] && [ -f "$apply_seccomp_bin" ]; then
+        echo "✓ Success: BPF filter and apply-seccomp binary ready for $vendor_dir"
+        echo "  - BPF filter: $(ls -lh "$bpf_file" | awk '{print $5}')"
+        echo "  - apply-seccomp: $(ls -lh "$apply_seccomp_bin" | awk '{print $5}')"
         return 0
     else
-        echo "✗ Error: BPF file not found in $output_dir"
+        if [ ! -f "$bpf_file" ]; then
+            echo "✗ Error: BPF file not found in $output_dir"
+        fi
+        if [ ! -f "$apply_seccomp_bin" ]; then
+            echo "✗ Error: apply-seccomp binary not found in $output_dir"
+        fi
         return 1
     fi
 }
@@ -164,11 +195,14 @@ if [ ${#FAILED_PLATFORMS[@]} -eq 0 ]; then
     echo "Generated BPF filters:"
     find "$ROOT_DIR/vendor/seccomp" -name "*.bpf" | sort
     echo ""
+    echo "Generated apply-seccomp binaries:"
+    find "$ROOT_DIR/vendor/seccomp" -name "apply-seccomp" | sort
+    echo ""
     echo "Total size:"
     du -sh "$ROOT_DIR/vendor/seccomp"
     echo ""
-    echo "BPF filter sizes:"
-    find "$ROOT_DIR/vendor/seccomp" -name "*.bpf" -exec ls -lh {} \; | awk '{print $9 ": " $5}'
+    echo "File sizes:"
+    find "$ROOT_DIR/vendor/seccomp" \( -name "*.bpf" -o -name "apply-seccomp" \) -exec ls -lh {} \; | awk '{print $9 ": " $5}'
     exit 0
 else
     echo "✗ Build failed for: ${FAILED_PLATFORMS[*]}"

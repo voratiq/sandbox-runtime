@@ -189,6 +189,55 @@ export function getPreGeneratedBpfPath(): string | null {
   return null
 }
 
+/**
+ * Get the path to the apply-seccomp binary from the vendor directory
+ * Returns the path if it exists, null otherwise
+ *
+ * Pre-built apply-seccomp binaries are organized by architecture:
+ * - vendor/seccomp/{x64,arm64}/apply-seccomp
+ *
+ * Tries multiple paths for resilience:
+ * 1. ../../vendor/seccomp/{arch}/apply-seccomp (package root - standard npm installs)
+ * 2. ../vendor/seccomp/{arch}/apply-seccomp (dist/vendor - for bundlers)
+ */
+export function getApplySeccompBinaryPath(): string | null {
+  // Determine architecture
+  const arch = getVendorArchitecture()
+  if (!arch) {
+    logForDebugging(
+      `[SeccompFilter] Cannot find apply-seccomp binary: unsupported architecture ${process.arch}`,
+    )
+    return null
+  }
+
+  logForDebugging(`[SeccompFilter] Looking for apply-seccomp binary for architecture: ${arch}`)
+
+  // Try to locate the binary with fallback paths
+  // Path is relative to the compiled code location (dist/sandbox/)
+  const baseDir = dirname(fileURLToPath(import.meta.url))
+  const relativePath = join('vendor', 'seccomp', arch, 'apply-seccomp')
+
+  // Try paths in order of preference
+  const pathsToTry = [
+    join(baseDir, '..', '..', relativePath), // package root: vendor/seccomp/...
+    join(baseDir, '..', relativePath),       // dist: dist/vendor/seccomp/...
+  ]
+
+  for (const binaryPath of pathsToTry) {
+    if (fs.existsSync(binaryPath)) {
+      logForDebugging(
+        `[SeccompFilter] Found apply-seccomp binary: ${binaryPath} (${arch})`,
+      )
+      return binaryPath
+    }
+  }
+
+  logForDebugging(
+    `[SeccompFilter] apply-seccomp binary not found in any expected location (${arch})`,
+  )
+  return null
+}
+
 // Cache directory for compiled binaries
 const CACHE_DIR = join(tmpdir(), 'claude', 'seccomp-cache')
 

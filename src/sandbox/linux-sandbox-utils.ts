@@ -20,6 +20,7 @@ import {
   cleanupSeccompFilter,
   hasSeccompDependenciesSync,
   getPreGeneratedBpfPath,
+  getApplySeccompBinaryPath,
 } from './generate-seccomp-filter.js'
 
 export interface LinuxNetworkBridgeContext {
@@ -247,9 +248,6 @@ export async function initializeLinuxNetworkBridge(
 /**
  * Build the command that runs inside the sandbox.
  * Sets up HTTP proxy on port 3128 and SOCKS proxy on port 1080
- *
- * Returns both the command string and an optional file descriptor redirect.
- * The redirect must be applied at the shell level AFTER the command.
  */
 function buildSandboxCommand(
   httpSocketPath: string,
@@ -257,7 +255,7 @@ function buildSandboxCommand(
   userCommand: string,
   seccompFilterPath: string | undefined,
   shell?: string,
-): { command: string; fdRedirect?: string } {
+): string {
   // Default to bash for backward compatibility
   const shellPath = shell || 'bash'
   const socatCommands = [
@@ -266,39 +264,37 @@ function buildSandboxCommand(
     'trap "kill %1 %2 2>/dev/null; exit" EXIT',
   ]
 
-  // If seccomp filter is provided, use nested bwrap to apply it
+  // If seccomp filter is provided, use apply-seccomp to apply it
   if (seccompFilterPath) {
-    // Nested bwrap approach:
+    // apply-seccomp approach:
     // 1. Outer bwrap/bash: starts socat processes (can use Unix sockets)
-    // 2. Inner bwrap: applies seccomp filter and execs user command
+    // 2. apply-seccomp: applies seccomp filter and execs user command
     // 3. User command runs with seccomp active (Unix sockets blocked)
     //
-    // The inner bwrap uses --dev-bind / / to inherit the mount namespace from the outer bwrap,
-    // preserving both read-only and writable mounts set up by the outer bwrap.
-    // This allows the inner bwrap to respect the filesystem restrictions already in place.
-    // Use --unshare-user-try to skip user namespace creation when nested (GitHub Actions CI)
-    // The file descriptor redirect (3< file) must be applied OUTSIDE the quoted bash -c argument
-    // Use --die-with-parent to avoid namespace issues when nested in PID namespace
-    const innerBwrapCmd = shellquote.quote([
-      'bwrap',
-      '--dev-bind', '/', '/',
-      '--unshare-user-try',
-      '--seccomp', '3',
-      '--die-with-parent',
-      '--',
+    // apply-seccomp is a simple C program that:
+    // - Sets PR_SET_NO_NEW_PRIVS
+    // - Applies the seccomp BPF filter via prctl(PR_SET_SECCOMP)
+    // - Execs the user command
+    //
+    // This is simpler and more portable than nested bwrap, with no FD redirects needed.
+    const applySeccompBinary = getApplySeccompBinaryPath()
+    if (!applySeccompBinary) {
+      throw new Error(
+        'apply-seccomp binary not found. This should have been caught earlier. ' +
+        'Ensure vendor/seccomp/{x64,arm64}/apply-seccomp binaries are included in the package.',
+      )
+    }
+
+    const applySeccompCmd = shellquote.quote([
+      applySeccompBinary,
+      seccompFilterPath,
       shellPath,
       '-c',
       userCommand,
-    ]) + ' 3<&3'  // Pass FD 3 from parent shell to inner bwrap
+    ])
 
-    const innerScript = [...socatCommands, innerBwrapCmd].join('\n')
-    const command = `${shellPath} -c ${shellquote.quote([innerScript])}`
-
-    // Return command with FD redirect that must be applied at outer shell level
-    return {
-      command,
-      fdRedirect: `3< ${shellquote.quote([seccompFilterPath])}`
-    }
+    const innerScript = [...socatCommands, applySeccompCmd].join('\n')
+    return `${shellPath} -c ${shellquote.quote([innerScript])}`
   } else {
     // No seccomp filter - run user command directly
     const innerScript = [
@@ -306,9 +302,7 @@ function buildSandboxCommand(
       `eval ${shellquote.quote([userCommand])}`,
     ].join('\n')
 
-    return {
-      command: `${shellPath} -c ${shellquote.quote([innerScript])}`
-    }
+    return `${shellPath} -c ${shellquote.quote([innerScript])}`
   }
 }
 
@@ -432,9 +426,9 @@ async function generateFilesystemArgs(
 /**
  * Wrap a command with sandbox restrictions on Linux
  *
- * UNIX SOCKET BLOCKING (NESTED BWRAP WITH SECCOMP):
- * This implementation uses bubblewrap's built-in --seccomp flag in a nested configuration
- * to block Unix domain socket creation for user commands while allowing network infrastructure:
+ * UNIX SOCKET BLOCKING (APPLY-SECCOMP):
+ * This implementation uses a custom apply-seccomp binary to block Unix domain socket
+ * creation for user commands while allowing network infrastructure:
  *
  * Stage 1: Outer bwrap - Network and filesystem isolation (NO seccomp)
  *   - Bubblewrap starts with isolated network namespace (--unshare-net)
@@ -442,11 +436,10 @@ async function generateFilesystemArgs(
  *   - Filesystem restrictions are applied (read-only mounts, bind mounts, etc.)
  *   - Socat processes start and connect to Unix socket bridges (can use socket(AF_UNIX, ...))
  *
- * Stage 2: Inner bwrap - Seccomp filter application (ONLY seccomp)
- *   - Nested bwrap applies seccomp filter via --seccomp flag (blocks Unix socket creation)
- *   - Uses --dev-bind / / to inherit mount namespace from outer bwrap
- *   - Uses --unshare-user-try to skip user namespace creation in restricted environments (CI)
- *   - User command executes with seccomp active (cannot create new Unix sockets)
+ * Stage 2: apply-seccomp - Seccomp filter application (ONLY seccomp)
+ *   - apply-seccomp binary applies seccomp filter via prctl(PR_SET_SECCOMP)
+ *   - Sets PR_SET_NO_NEW_PRIVS to allow seccomp without root
+ *   - Execs user command with seccomp active (cannot create new Unix sockets)
  *
  * This solves the conflict between:
  * - Security: Blocking arbitrary Unix socket creation in user commands
@@ -469,6 +462,7 @@ async function generateFilesystemArgs(
  * because seccomp-bpf cannot inspect user-space memory to read socket paths.
  *
  * Requirements for seccomp filtering:
+ * - Pre-built apply-seccomp binaries are included for x64 and ARM64
  * - Pre-generated BPF filters are included for x64 and ARM64
  * - For other architectures: gcc or clang + libseccomp-dev for runtime BPF compilation
  * Dependencies are checked by hasLinuxSandboxDependenciesSync() before enabling the sandbox.
@@ -613,52 +607,44 @@ export async function wrapCommandWithSandboxLinux(
     const shell = shellPathResult.stdout.trim()
     bwrapArgs.push('--', shell, '-c')
 
-    // Track if we need to apply a file descriptor redirect at the outer level
-    let outerFdRedirect: string | undefined = undefined
-
-    // If we have network restrictions, use the network bridge setup with nested bwrap for seccomp
-    // Otherwise, just run the command directly
+    // If we have network restrictions, use the network bridge setup with apply-seccomp for seccomp
+    // Otherwise, just run the command directly with apply-seccomp if needed
     if (hasNetworkRestrictions && httpSocketPath && socksSocketPath) {
-      // Pass seccomp filter to buildSandboxCommand for nested bwrap application
+      // Pass seccomp filter to buildSandboxCommand for apply-seccomp application
       // This allows socat to start before seccomp is applied
-      const result = buildSandboxCommand(
+      const sandboxCommand = buildSandboxCommand(
         httpSocketPath,
         socksSocketPath,
         command,
         seccompFilterPath,
         shell,
       )
-      bwrapArgs.push(result.command)
-      outerFdRedirect = result.fdRedirect
+      bwrapArgs.push(sandboxCommand)
     } else if (seccompFilterPath) {
-      // No network restrictions but we have seccomp - use nested bwrap directly
-      // Build the nested bwrap command with FD redirect
-      // Use --dev-bind / / to inherit mount namespace from outer bwrap (preserves writable mounts)
-      // Use --unshare-user-try to skip user namespace creation when nested (GitHub Actions CI)
-      // Use --die-with-parent to avoid namespace issues when nested in PID namespace
-      const innerBwrapCmd = shellquote.quote([
-        'bwrap',
-        '--dev-bind', '/', '/',
-        '--unshare-user-try',
-        '--seccomp', '3',
-        '--die-with-parent',
-        '--',
+      // No network restrictions but we have seccomp - use apply-seccomp directly
+      // apply-seccomp is a simple C program that applies the seccomp filter and execs the command
+      const applySeccompBinary = getApplySeccompBinaryPath()
+      if (!applySeccompBinary) {
+        throw new Error(
+          'apply-seccomp binary not found. This should have been caught earlier. ' +
+          'Ensure vendor/seccomp/{x64,arm64}/apply-seccomp binaries are included in the package.',
+        )
+      }
+
+      const applySeccompCmd = shellquote.quote([
+        applySeccompBinary,
+        seccompFilterPath,
         shell,
         '-c',
         command,
-      ]) + ' 3<&3'  // Pass FD 3 from parent
-      bwrapArgs.push(innerBwrapCmd)
-      outerFdRedirect = `3< ${shellquote.quote([seccompFilterPath])}`
+      ])
+      bwrapArgs.push(applySeccompCmd)
     } else {
       bwrapArgs.push(command)
     }
 
     // Build the outer bwrap command
-    // Apply FD redirect at the end if needed (for seccomp filter)
-    let wrappedCommand = shellquote.quote(['bwrap', ...bwrapArgs])
-    if (outerFdRedirect) {
-      wrappedCommand += ` ${outerFdRedirect}`
-    }
+    const wrappedCommand = shellquote.quote(['bwrap', ...bwrapArgs])
 
     const restrictions = []
     if (hasNetworkRestrictions) restrictions.push('network')
