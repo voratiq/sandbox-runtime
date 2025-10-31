@@ -266,7 +266,10 @@ function buildSandboxCommand(
   socksSocketPath: string,
   userCommand: string,
   seccompFilterPath?: string,
+  shell?: string,
 ): string {
+  // Default to bash for backward compatibility
+  const shellPath = shell || 'bash'
   const socatCommands = [
     `socat TCP-LISTEN:3128,fork,reuseaddr UNIX-CONNECT:${httpSocketPath} >/dev/null 2>&1 &`,
     `socat TCP-LISTEN:1080,fork,reuseaddr UNIX-CONNECT:${socksSocketPath} >/dev/null 2>&1 &`,
@@ -298,13 +301,13 @@ function buildSandboxCommand(
       applySeccompScript,
       seccompFilterPath,
       '--',
-      'bash',
+      shellPath,
       '-c',
       userCommand,
     ])
 
     const innerScript = [...socatCommands, applySeccompCmd].join('\n')
-    return `bash -c ${shellquote.quote([innerScript])}`
+    return `${shellPath} -c ${shellquote.quote([innerScript])}`
   } else {
     // No seccomp filter - run user command directly
     const innerScript = [
@@ -633,6 +636,7 @@ export async function wrapCommandWithSandboxLinux(
           socksSocketPath,
           command,
           seccompFilterPath,
+          shell,
         ),
       )
     } else {
