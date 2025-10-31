@@ -7,9 +7,8 @@ import { getPlatform } from '../../src/utils/platform.js'
 import {
   generateSeccompFilter,
   cleanupSeccompFilter,
-  hasSeccompDependenciesSync,
-  getApplySeccompExecPath,
   getPreGeneratedBpfPath,
+  getApplySeccompBinaryPath,
 } from '../../src/sandbox/generate-seccomp-filter.js'
 import {
   wrapCommandWithSandboxLinux,
@@ -24,23 +23,7 @@ function skipIfNotAnt(): boolean {
   return process.env.USER_TYPE !== 'ant'
 }
 
-describe('Seccomp Dependencies', () => {
-  it('should check for seccomp dependencies', () => {
-    if (skipIfNotLinux()) {
-      return
-    }
-
-    const hasDeps = hasSeccompDependenciesSync()
-    expect(typeof hasDeps).toBe('boolean')
-
-    // If we have dependencies, we should have both compiler and libseccomp
-    if (hasDeps) {
-      const gccResult = spawnSync('which', ['gcc'], { stdio: 'ignore' })
-      const clangResult = spawnSync('which', ['clang'], { stdio: 'ignore' })
-      expect(gccResult.status === 0 || clangResult.status === 0).toBe(true)
-    }
-  }, { timeout: 15000 })
-
+describe('Linux Sandbox Dependencies', () => {
   it('should check for Linux sandbox dependencies', () => {
     if (skipIfNotLinux()) {
       return
@@ -55,26 +38,7 @@ describe('Seccomp Dependencies', () => {
       const socatResult = spawnSync('which', ['socat'], { stdio: 'ignore' })
       expect(bwrapResult.status).toBe(0)
       expect(socatResult.status).toBe(0)
-
-      // For ANT users, should also check seccomp dependencies
-      if (process.env.USER_TYPE === 'ant') {
-        expect(hasSeccompDependenciesSync()).toBe(true)
-      }
     }
-  })
-
-  it('should be memoized to avoid repeated checks', () => {
-    if (skipIfNotLinux()) {
-      return
-    }
-
-    // Call multiple times - should be fast due to memoization
-    const result1 = hasSeccompDependenciesSync()
-    const result2 = hasSeccompDependenciesSync()
-    const result3 = hasSeccompDependenciesSync()
-
-    expect(result1).toBe(result2)
-    expect(result2).toBe(result3)
   })
 })
 
@@ -102,7 +66,7 @@ describe('Pre-generated BPF Support', () => {
     }
   })
 
-  it('should not require gcc/clang when pre-generated BPF exists', () => {
+  it('should have sandbox dependencies on x64/arm64 with bwrap and socat', () => {
     if (skipIfNotLinux()) {
       return
     }
@@ -114,19 +78,16 @@ describe('Pre-generated BPF Support', () => {
       return
     }
 
-    // Check if we have compilation dependencies
-    const hasCompilationDeps = hasSeccompDependenciesSync()
-
     // hasLinuxSandboxDependenciesSync should succeed on x64/arm64
     // with just bwrap and socat (pre-built binaries included)
     const hasSandboxDeps = hasLinuxSandboxDependenciesSync()
 
     // On x64/arm64 with pre-built binaries, we should have sandbox deps
-    // regardless of whether compilation deps are available
     const bwrapResult = spawnSync('which', ['bwrap'], { stdio: 'ignore' })
     const socatResult = spawnSync('which', ['socat'], { stdio: 'ignore' })
+    const hasApplySeccomp = getApplySeccompBinaryPath() !== null
 
-    if (bwrapResult.status === 0 && socatResult.status === 0) {
+    if (bwrapResult.status === 0 && socatResult.status === 0 && hasApplySeccomp) {
       // Basic deps available - on x64/arm64 this should be sufficient
       // (pre-built apply-seccomp binaries and BPF filters are included)
       const arch = process.arch
@@ -167,38 +128,23 @@ describe('Pre-generated BPF Support', () => {
   })
 })
 
-describe('Seccomp Filter Generation', () => {
-  let filterPath: string | null = null
-  const generatedFilters: string[] = []
-
-  afterAll(() => {
-    // Clean up all generated filter files
-    for (const path of generatedFilters) {
-      try {
-        cleanupSeccompFilter(path)
-      } catch {
-        // Ignore cleanup errors
-      }
-    }
-  })
-
-  it('should generate a valid BPF filter file', () => {
-    if (skipIfNotLinux() || skipIfNotAnt()) {
+describe('Seccomp Filter (Pre-generated)', () => {
+  it('should return pre-generated BPF filter on x64/arm64', () => {
+    if (skipIfNotLinux()) {
       return
     }
 
-    if (!hasSeccompDependenciesSync()) {
+    const arch = process.arch
+    if (arch !== 'x64' && arch !== 'arm64' && arch !== 'x86_64' && arch !== 'aarch64') {
+      // Not a supported architecture
       return
     }
 
-    filterPath = generateSeccompFilter()
-    if (filterPath) {
-      generatedFilters.push(filterPath)
-    }
+    const filterPath = generateSeccompFilter()
 
     expect(filterPath).toBeTruthy()
     expect(filterPath).toMatch(/\.bpf$/)
-    expect(filterPath).toContain(tmpdir())
+    expect(filterPath).toContain('vendor/seccomp')
 
     // Verify the file exists
     expect(existsSync(filterPath!)).toBe(true)
@@ -211,35 +157,34 @@ describe('Seccomp Filter Generation', () => {
     expect(stats.size % 8).toBe(0)
   })
 
-  it('should generate unique filter files on each call', () => {
-    if (skipIfNotLinux() || skipIfNotAnt()) {
+  it('should return same path on repeated calls (pre-generated)', () => {
+    if (skipIfNotLinux()) {
       return
     }
 
-    if (!hasSeccompDependenciesSync()) {
+    const arch = process.arch
+    if (arch !== 'x64' && arch !== 'arm64' && arch !== 'x86_64' && arch !== 'aarch64') {
       return
     }
 
     const filter1 = generateSeccompFilter()
     const filter2 = generateSeccompFilter()
 
-    if (filter1) generatedFilters.push(filter1)
-    if (filter2) generatedFilters.push(filter2)
-
     expect(filter1).toBeTruthy()
     expect(filter2).toBeTruthy()
 
-    // Should generate different filenames (timestamped)
-    expect(filter1).not.toBe(filter2)
+    // Should return same pre-generated file path
+    expect(filter1).toBe(filter2)
   })
 
-  it('should return null when dependencies are missing', () => {
-    if (skipIfNotLinux() || skipIfNotAnt()) {
+  it('should return null on unsupported architectures', () => {
+    if (skipIfNotLinux()) {
       return
     }
 
-    if (hasSeccompDependenciesSync()) {
-      // Can't test this case if dependencies are available
+    const arch = process.arch
+    if (arch === 'x64' || arch === 'arm64' || arch === 'x86_64' || arch === 'aarch64') {
+      // This test is for unsupported architectures only
       return
     }
 
@@ -247,89 +192,51 @@ describe('Seccomp Filter Generation', () => {
     expect(filter).toBeNull()
   })
 
-  it('should clean up filter files', () => {
-    if (skipIfNotLinux() || skipIfNotAnt()) {
-      return
-    }
-
-    if (!hasSeccompDependenciesSync()) {
-      return
-    }
-
-    const filter = generateSeccompFilter()
-    expect(filter).toBeTruthy()
-    expect(existsSync(filter!)).toBe(true)
-
-    cleanupSeccompFilter(filter!)
-    expect(existsSync(filter!)).toBe(false)
-  })
-
-  it('should handle cleanup of non-existent files gracefully', () => {
+  it('should handle cleanup gracefully (no-op for pre-generated files)', () => {
     if (skipIfNotLinux()) {
       return
     }
 
-    const fakePath = '/tmp/nonexistent-filter.bpf'
-    expect(() => cleanupSeccompFilter(fakePath)).not.toThrow()
+    // Cleanup should not throw for any path (it's a no-op)
+    expect(() => cleanupSeccompFilter('/tmp/test.bpf')).not.toThrow()
+    expect(() => cleanupSeccompFilter('/vendor/seccomp/x64/unix-block.bpf')).not.toThrow()
+    expect(() => cleanupSeccompFilter('')).not.toThrow()
   })
 })
 
-describe('Apply Seccomp Helper', () => {
-  it('should compile the apply-seccomp-and-exec helper', () => {
-    if (skipIfNotLinux() || skipIfNotAnt()) {
+describe('Apply Seccomp Binary', () => {
+  it('should find pre-built apply-seccomp binary on x64/arm64', () => {
+    if (skipIfNotLinux()) {
       return
     }
 
-    if (!hasSeccompDependenciesSync()) {
+    const arch = process.arch
+    if (arch !== 'x64' && arch !== 'arm64' && arch !== 'x86_64' && arch !== 'aarch64') {
       return
     }
 
-    const helperPath = getApplySeccompExecPath()
-    expect(helperPath).toBeTruthy()
+    const binaryPath = getApplySeccompBinaryPath()
+    expect(binaryPath).toBeTruthy()
 
-    // Verify the file exists and is executable
-    expect(existsSync(helperPath!)).toBe(true)
+    // Verify the file exists
+    expect(existsSync(binaryPath!)).toBe(true)
 
-    const stats = statSync(helperPath!)
-    expect(stats.size).toBeGreaterThan(0)
-
-    // Check if file is executable (Unix permission check)
-    const mode = stats.mode
-    const isExecutable = (mode & 0o111) !== 0
-    expect(isExecutable).toBe(true)
+    // Should be in vendor directory
+    expect(binaryPath).toContain('vendor/seccomp')
   })
 
-  it('should cache compiled helper binary', () => {
-    if (skipIfNotLinux() || skipIfNotAnt()) {
+  it('should return null on unsupported architectures', () => {
+    if (skipIfNotLinux()) {
       return
     }
 
-    if (!hasSeccompDependenciesSync()) {
+    const arch = process.arch
+    if (arch === 'x64' || arch === 'arm64' || arch === 'x86_64' || arch === 'aarch64') {
       return
     }
 
-    // Call multiple times - should return same cached path
-    const helper1 = getApplySeccompExecPath()
-    const helper2 = getApplySeccompExecPath()
-
-    expect(helper1).toBe(helper2)
-  })
-
-  it('should store helper in cache directory', () => {
-    if (skipIfNotLinux() || skipIfNotAnt()) {
-      return
-    }
-
-    if (!hasSeccompDependenciesSync()) {
-      return
-    }
-
-    const helperPath = getApplySeccompExecPath()
-    expect(helperPath).toBeTruthy()
-
-    const cacheDir = join(tmpdir(), 'claude', 'seccomp-cache')
-    expect(helperPath).toContain(cacheDir)
-    expect(helperPath).toContain('apply-seccomp-and-exec')
+    const binaryPath = getApplySeccompBinaryPath()
+    expect(binaryPath).toBeNull()
   })
 })
 
@@ -393,29 +300,6 @@ describe('Architecture Support', () => {
 })
 
 describe('USER_TYPE Gating', () => {
-  it('should only generate seccomp filters for ANT users', () => {
-    if (skipIfNotLinux()) {
-      return
-    }
-
-    if (!hasSeccompDependenciesSync()) {
-      return
-    }
-
-    if (process.env.USER_TYPE === 'ant') {
-      // ANT users should get seccomp filters
-      const filter = generateSeccompFilter()
-      expect(filter).toBeTruthy()
-      if (filter) {
-        cleanupSeccompFilter(filter)
-      }
-    } else {
-      // Non-ANT users - filter generation should still work for testing
-      // but won't be used in production sandbox commands
-      expect(true).toBe(true)
-    }
-  })
-
   it('should only apply seccomp in sandbox for ANT users', async () => {
     if (skipIfNotLinux()) {
       return
@@ -432,12 +316,12 @@ describe('USER_TYPE Gating', () => {
       hasFilesystemRestrictions: false,
     })
 
-    if (process.env.USER_TYPE === 'ant' && hasSeccompDependenciesSync()) {
-      // ANT users should have seccomp helper in command
-      expect(wrappedCommand).toContain('apply-seccomp-and-exec')
+    if (process.env.USER_TYPE === 'ant') {
+      // ANT users should have apply-seccomp binary in command
+      expect(wrappedCommand).toContain('apply-seccomp')
     } else {
       // Non-ANT users should not have seccomp
-      expect(wrappedCommand).not.toContain('apply-seccomp-and-exec')
+      expect(wrappedCommand).not.toContain('apply-seccomp')
     }
   })
 })
@@ -450,17 +334,7 @@ describe('Socket Filtering Behavior', () => {
       return
     }
 
-    if (!hasSeccompDependenciesSync()) {
-      return
-    }
-
     filterPath = generateSeccompFilter()
-  })
-
-  afterAll(() => {
-    if (filterPath) {
-      cleanupSeccompFilter(filterPath)
-    }
   })
 
   it('should block Unix socket creation (SOCK_STREAM)', async () => {
@@ -600,18 +474,16 @@ describe('Two-Stage Seccomp Application', () => {
       hasFilesystemRestrictions: false,
     })
 
-    // Command should include both socat and the seccomp helper
-    if (hasSeccompDependenciesSync()) {
-      expect(wrappedCommand).toContain('socat')
-      expect(wrappedCommand).toContain('apply-seccomp-and-exec')
+    // Command should include both socat and the apply-seccomp binary
+    expect(wrappedCommand).toContain('socat')
+    expect(wrappedCommand).toContain('apply-seccomp')
 
-      // The socat should come before the apply-seccomp-and-exec
-      const socatIndex = wrappedCommand.indexOf('socat')
-      const seccompIndex = wrappedCommand.indexOf('apply-seccomp-and-exec')
-      expect(socatIndex).toBeGreaterThan(-1)
-      expect(seccompIndex).toBeGreaterThan(-1)
-      expect(socatIndex).toBeLessThan(seccompIndex)
-    }
+    // The socat should come before the apply-seccomp
+    const socatIndex = wrappedCommand.indexOf('socat')
+    const seccompIndex = wrappedCommand.indexOf('apply-seccomp')
+    expect(socatIndex).toBeGreaterThan(-1)
+    expect(seccompIndex).toBeGreaterThan(-1)
+    expect(socatIndex).toBeLessThan(seccompIndex)
   })
 
   it('should execute user command with filter applied', async () => {
@@ -619,7 +491,7 @@ describe('Two-Stage Seccomp Application', () => {
       return
     }
 
-    if (!hasLinuxSandboxDependenciesSync() || !hasSeccompDependenciesSync()) {
+    if (!hasLinuxSandboxDependenciesSync()) {
       return
     }
 
@@ -701,44 +573,25 @@ describe('Sandbox Integration', () => {
     })
 
     const isAnt = process.env.USER_TYPE === 'ant'
-    const hasSeccomp = hasSeccompDependenciesSync()
 
-    if (isAnt && hasSeccomp) {
-      expect(wrappedCommand).toContain('apply-seccomp-and-exec')
+    if (isAnt) {
+      expect(wrappedCommand).toContain('apply-seccomp')
     } else {
-      expect(wrappedCommand).not.toContain('apply-seccomp-and-exec')
+      expect(wrappedCommand).not.toContain('apply-seccomp')
     }
   })
 })
 
 describe('Error Handling', () => {
-  it('should handle cleanup errors gracefully', () => {
+  it('should handle cleanup calls gracefully (no-op)', () => {
     if (skipIfNotLinux()) {
       return
     }
 
-    // Try to clean up invalid paths
+    // Cleanup is a no-op for pre-generated files, should never throw
     expect(() => cleanupSeccompFilter('')).not.toThrow()
     expect(() => cleanupSeccompFilter('/invalid/path/filter.bpf')).not.toThrow()
     expect(() => cleanupSeccompFilter('/tmp/nonexistent.bpf')).not.toThrow()
-  })
-
-  it('should handle multiple cleanup calls on same file', () => {
-    if (skipIfNotLinux() || skipIfNotAnt()) {
-      return
-    }
-
-    if (!hasSeccompDependenciesSync()) {
-      return
-    }
-
-    const filter = generateSeccompFilter()
-    if (!filter) {
-      return
-    }
-
-    cleanupSeccompFilter(filter)
-    // Second cleanup should not throw
-    expect(() => cleanupSeccompFilter(filter)).not.toThrow()
+    expect(() => cleanupSeccompFilter('/vendor/seccomp/x64/unix-block.bpf')).not.toThrow()
   })
 })
