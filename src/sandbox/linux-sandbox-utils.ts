@@ -276,12 +276,13 @@ function buildSandboxCommand(
     // The inner bwrap uses --dev-bind / / to inherit the mount namespace from the outer bwrap,
     // preserving both read-only and writable mounts set up by the outer bwrap.
     // This allows the inner bwrap to respect the filesystem restrictions already in place.
-    // Use --dev-bind instead of --bind to avoid creating a new user namespace (which fails in CI)
+    // Use --unshare-user-try to skip user namespace creation when nested (GitHub Actions CI)
     // The file descriptor redirect (3< file) must be applied OUTSIDE the quoted bash -c argument
     // Use --die-with-parent to avoid namespace issues when nested in PID namespace
     const innerBwrapCmd = shellquote.quote([
       'bwrap',
       '--dev-bind', '/', '/',
+      '--unshare-user-try',
       '--seccomp', '3',
       '--die-with-parent',
       '--',
@@ -443,7 +444,8 @@ async function generateFilesystemArgs(
  *
  * Stage 2: Inner bwrap - Seccomp filter application (ONLY seccomp)
  *   - Nested bwrap applies seccomp filter via --seccomp flag (blocks Unix socket creation)
- *   - Uses --dev-bind / / to inherit mount namespace without creating new user namespace
+ *   - Uses --dev-bind / / to inherit mount namespace from outer bwrap
+ *   - Uses --unshare-user-try to skip user namespace creation in restricted environments (CI)
  *   - User command executes with seccomp active (cannot create new Unix sockets)
  *
  * This solves the conflict between:
@@ -632,11 +634,12 @@ export async function wrapCommandWithSandboxLinux(
       // No network restrictions but we have seccomp - use nested bwrap directly
       // Build the nested bwrap command with FD redirect
       // Use --dev-bind / / to inherit mount namespace from outer bwrap (preserves writable mounts)
-      // Use --dev-bind instead of --bind to avoid creating a new user namespace (which fails in CI)
+      // Use --unshare-user-try to skip user namespace creation when nested (GitHub Actions CI)
       // Use --die-with-parent to avoid namespace issues when nested in PID namespace
       const innerBwrapCmd = shellquote.quote([
         'bwrap',
         '--dev-bind', '/', '/',
+        '--unshare-user-try',
         '--seccomp', '3',
         '--die-with-parent',
         '--',
