@@ -395,7 +395,10 @@ async function waitForNetworkInitialization(): Promise<boolean> {
   return managerContext !== undefined
 }
 
-async function wrapWithSandbox(command: string): Promise<string> {
+async function wrapWithSandbox(
+  command: string,
+  binShell?: string,
+): Promise<string> {
   // If no config, return command as-is
   if (!config) {
     return command
@@ -419,6 +422,7 @@ async function wrapWithSandbox(command: string): Promise<string> {
         allowAllUnixSockets: getAllowAllUnixSockets(),
         allowLocalBinding: getAllowLocalBinding(),
         ignoreViolations: getIgnoreViolations(),
+        binShell,
       })
 
     case 'linux':
@@ -434,6 +438,7 @@ async function wrapWithSandbox(command: string): Promise<string> {
         writeConfig: getFsWriteConfig(),
         enableWeakerNestedSandbox: getEnableWeakerNestedSandbox(),
         allowAllUnixSockets: getAllowAllUnixSockets(),
+        binShell,
       })
 
     default:
@@ -687,7 +692,7 @@ export interface ISandboxManager {
   getLinuxHttpSocketPath(): string | undefined
   getLinuxSocksSocketPath(): string | undefined
   waitForNetworkInitialization(): Promise<boolean>
-  wrapWithSandbox(command: string): Promise<string>
+  wrapWithSandbox(command: string, binShell?: string): Promise<string>
   getSandboxViolationStore(): SandboxViolationStore
   annotateStderrWithSandboxFailures(command: string, stderr: string): string
   getLinuxGlobPatternWarnings(): string[]

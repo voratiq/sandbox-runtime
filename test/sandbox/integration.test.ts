@@ -447,6 +447,86 @@ describe('Sandbox Integration Tests', () => {
         expect(result.stdout).not.toContain('line1')
       })
     })
+
+    describe('Shell Selection (binShell parameter)', () => {
+      it('should execute commands with zsh when binShell is specified', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        // Check if zsh is available
+        const zshCheck = spawnSync('which zsh', { shell: true, encoding: 'utf8' })
+        if (zshCheck.status !== 0) {
+          console.log('zsh not available, skipping test')
+          return
+        }
+
+        // Use a zsh-specific feature: $ZSH_VERSION
+        const command = await SandboxManager.wrapWithSandbox(
+          'echo "Shell: $ZSH_VERSION"',
+          'zsh'
+        )
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          timeout: 5000,
+        })
+
+        expect(result.status).toBe(0)
+        // Should contain version number (e.g., "Shell: 5.8.1")
+        expect(result.stdout).toMatch(/Shell: \d+\.\d+/)
+      })
+
+      it('should use zsh syntax successfully with binShell=zsh', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        // Check if zsh is available
+        const zshCheck = spawnSync('which zsh', { shell: true, encoding: 'utf8' })
+        if (zshCheck.status !== 0) {
+          console.log('zsh not available, skipping test')
+          return
+        }
+
+        // Use zsh parameter expansion feature
+        const command = await SandboxManager.wrapWithSandbox(
+          'VAR="hello world" && echo ${VAR:u}',
+          'zsh'
+        )
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          timeout: 5000,
+        })
+
+        expect(result.status).toBe(0)
+        expect(result.stdout).toContain('HELLO WORLD')
+      })
+
+      it('should default to bash when binShell is not specified', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        // Check for bash-specific variable
+        const command = await SandboxManager.wrapWithSandbox(
+          'echo "Shell: $BASH_VERSION"'
+        )
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          timeout: 5000,
+        })
+
+        expect(result.status).toBe(0)
+        // Should contain bash version
+        expect(result.stdout).toMatch(/Shell: \d+\.\d+/)
+      })
+    })
   })
 
   // ==========================================================================
@@ -753,6 +833,65 @@ describe('Sandbox Integration Tests', () => {
         expect(result.status).toBe(0)
         expect(result.stdout).toContain('line2')
         expect(result.stdout).not.toContain('line1')
+      })
+    })
+
+    describe('Shell Selection (binShell parameter)', () => {
+      it('should execute commands with zsh when binShell is specified', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        // Check if zsh is available
+        const zshCheck = spawnSync('which zsh', { shell: true, encoding: 'utf8' })
+        if (zshCheck.status !== 0) {
+          console.log('zsh not available, skipping test')
+          return
+        }
+
+        // Use a zsh-specific feature: $ZSH_VERSION
+        const command = await SandboxManager.wrapWithSandbox(
+          'echo "Shell: $ZSH_VERSION"',
+          'zsh'
+        )
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          timeout: 5000,
+        })
+
+        expect(result.status).toBe(0)
+        // Should contain version number (e.g., "Shell: 5.8.1")
+        expect(result.stdout).toMatch(/Shell: \d+\.\d+/)
+      })
+
+      it('should use zsh syntax successfully with binShell=zsh', async () => {
+        if (skipIfNotLinux()) {
+          return
+        }
+
+        // Check if zsh is available
+        const zshCheck = spawnSync('which zsh', { shell: true, encoding: 'utf8' })
+        if (zshCheck.status !== 0) {
+          console.log('zsh not available, skipping test')
+          return
+        }
+
+        // Use zsh parameter expansion feature
+        const command = await SandboxManager.wrapWithSandbox(
+          'VAR="hello world" && echo ${VAR:u}',
+          'zsh'
+        )
+
+        const result = spawnSync(command, {
+          shell: true,
+          encoding: 'utf8',
+          timeout: 5000,
+        })
+
+        expect(result.status).toBe(0)
+        expect(result.stdout).toContain('HELLO WORLD')
       })
     })
   })

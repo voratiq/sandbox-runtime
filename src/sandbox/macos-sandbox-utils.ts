@@ -1,5 +1,5 @@
 import shellquote from 'shell-quote'
-import { spawn } from 'child_process'
+import { spawn, spawnSync } from 'child_process'
 import { logForDebugging } from '../utils/debug.js'
 import { hasRipgrepSync } from '../utils/ripgrep.js'
 import {
@@ -36,6 +36,7 @@ export interface MacOSSandboxParams {
   readConfig: FsReadRestrictionConfig | undefined
   writeConfig: FsWriteRestrictionConfig | undefined
   ignoreViolations?: IgnoreViolationsConfig | undefined
+  binShell?: string
 }
 
 export interface SandboxViolationEvent {
@@ -494,6 +495,7 @@ export async function wrapCommandWithSandboxMacOS(
     allowLocalBinding,
     readConfig,
     writeConfig,
+    binShell,
   } = params
 
   // No sandboxing needed
@@ -518,11 +520,20 @@ export async function wrapCommandWithSandboxMacOS(
   // Generate proxy environment variables using shared utility
   const proxyEnv = `export ${generateProxyEnvVars(httpProxyPort, socksProxyPort).join(' ')} && `
 
+  // Use the user's shell (zsh, bash, etc.) to ensure aliases/snapshots work
+  // Resolve the full path to the shell binary
+  const shellName = binShell || 'bash'
+  const shellPathResult = spawnSync('which', [shellName], { encoding: 'utf8' })
+  if (shellPathResult.status !== 0) {
+    throw new Error(`Shell '${shellName}' not found in PATH`)
+  }
+  const shell = shellPathResult.stdout.trim()
+
   const wrappedCommand = shellquote.quote([
     'sandbox-exec',
     '-p',
     profile,
-    'bash',
+    shell,
     '-c',
     proxyEnv + command,
   ])
