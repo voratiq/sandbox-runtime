@@ -90,7 +90,7 @@ export function normalizePathForSandbox(pathPattern: string): string {
   // For glob patterns, resolve symlinks for the directory portion only
   if (containsGlobChars(normalizedPath)) {
     // Extract the static directory prefix before glob characters
-    const staticPrefix = normalizedPath.split(/[*?\[]/)[ 0]
+    const staticPrefix = normalizedPath.split(/[*?\[\]]/)[ 0]
     if (staticPrefix && staticPrefix !== '/') {
       // Get the directory containing the glob pattern
       // If staticPrefix ends with /, remove it to get the directory
