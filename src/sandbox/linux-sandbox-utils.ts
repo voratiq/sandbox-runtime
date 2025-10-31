@@ -18,7 +18,6 @@ import type {
 import {
   generateSeccompFilter,
   cleanupSeccompFilter,
-  hasSeccompDependenciesSync,
   getPreGeneratedBpfPath,
   getApplySeccompBinaryPath,
 } from './generate-seccomp-filter.js'
@@ -76,8 +75,8 @@ function registerSeccompCleanupHandler(): void {
  * Check if Linux sandbox dependencies are available (synchronous)
  * Returns true if bwrap and socat are installed.
  * Unless allowAllUnixSockets is enabled, also requires seccomp dependencies:
- * - On x64/arm64: Pre-generated BPF filters available, no additional dependencies needed
- * - On other architectures: gcc/clang and libseccomp-dev are required for runtime BPF compilation
+ * - On x64/arm64: Pre-generated BPF filters and apply-seccomp binaries available
+ * - On other architectures: Not currently supported (no apply-seccomp binary available)
  */
 export function hasLinuxSandboxDependenciesSync(allowAllUnixSockets = false): boolean {
   try {
@@ -97,13 +96,23 @@ export function hasLinuxSandboxDependenciesSync(allowAllUnixSockets = false): bo
       // Check if we have a pre-generated BPF filter for this architecture
       const hasPreGeneratedBpf = getPreGeneratedBpfPath() !== null
 
-      if (hasPreGeneratedBpf) {
-        // Pre-generated BPF available (x64/arm64) - no additional dependencies needed
+      // Check if we have the apply-seccomp binary for this architecture
+      const hasApplySeccompBinary = getApplySeccompBinaryPath() !== null
+
+      if (hasPreGeneratedBpf && hasApplySeccompBinary) {
+        // Pre-generated BPF and apply-seccomp binary available (x64/arm64)
         return hasBasicDeps
       } else {
-        // No pre-generated BPF - need compilation dependencies
-        // This includes gcc/clang + libseccomp-dev for runtime BPF generation
-        return hasBasicDeps && hasSeccompDependenciesSync()
+        // Architecture not supported - no pre-built apply-seccomp binary available
+        // Note: We cannot fall back to runtime BPF compilation because we need
+        // the apply-seccomp binary to actually apply the filter
+        logForDebugging(
+          `[Sandbox Linux] Architecture ${process.arch} is not supported for seccomp filtering. ` +
+          `Only x64 and arm64 are currently supported. To disable Unix socket blocking, ` +
+          `set allowAllUnixSockets: true in your configuration.`,
+          { level: 'warn' },
+        )
+        return false
       }
     }
 
@@ -464,7 +473,9 @@ async function generateFilesystemArgs(
  * Requirements for seccomp filtering:
  * - Pre-built apply-seccomp binaries are included for x64 and ARM64
  * - Pre-generated BPF filters are included for x64 and ARM64
- * - For other architectures: gcc or clang + libseccomp-dev for runtime BPF compilation
+ * - Other architectures are not currently supported (no apply-seccomp binary available)
+ * - To use sandboxing without Unix socket blocking on unsupported architectures,
+ *   set allowAllUnixSockets: true in your configuration
  * Dependencies are checked by hasLinuxSandboxDependenciesSync() before enabling the sandbox.
  */
 export async function wrapCommandWithSandboxLinux(
@@ -505,8 +516,7 @@ export async function wrapCommandWithSandboxLinux(
         // Fail loudly - seccomp filtering is required for security
         throw new Error(
           'Failed to generate seccomp filter for Unix socket blocking. ' +
-            'This may occur on unsupported architectures or when required dependencies are unavailable. ' +
-            'Required: For non-x64/arm64 architectures: gcc/clang + libseccomp-dev. ' +
+            'This may occur on unsupported architectures (only x64 and arm64 are currently supported). ' +
             'To disable Unix socket blocking, set allowAllUnixSockets: true in your configuration.',
         )
       }
