@@ -387,11 +387,6 @@ Watchman accesses files outside the sandbox boundaries, which will trigger permi
   - Ubuntu/Debian: `apt-get install socat`
   - Fedora: `dnf install socat`
   - Arch: `pacman -S socat`
-- **`python3` - REQUIRED for applying seccomp filters** (typically pre-installed on Linux)
-  - Ubuntu/Debian: `apt-get install python3`
-  - Fedora: `dnf install python3`
-  - Arch: `pacman -S python`
-  - **Note:** Python 3 is mandatory for Unix socket blocking security. To disable this security feature, set `allowAllUnixSockets: true` in your configuration.
 - `ripgrep` - Fast search tool for deny path detection
   - Ubuntu/Debian: `apt-get install ripgrep`
   - Fedora: `dnf install ripgrep`
@@ -499,18 +494,18 @@ On Linux, the sandbox uses **seccomp BPF (Berkeley Packet Filter)** to block Uni
 
 3. **Syscall filtering**: The BPF filter intercepts the `socket()` syscall and blocks creation of `AF_UNIX` sockets by returning `EPERM`. This prevents sandboxed code from creating new Unix domain sockets.
 
-4. **Two-stage application using Python helper script**:
+4. **Two-stage application using apply-seccomp binary**:
    - Outer bwrap creates the sandbox with filesystem, network, and PID namespace restrictions
    - Network bridging processes (socat) start inside the sandbox (need Unix sockets)
-   - Python helper script (apply-seccomp-and-exec.py) applies the seccomp filter via `prctl()`
-   - Python script execs the user command with seccomp active
+   - apply-seccomp binary applies the seccomp filter via `prctl()`
+   - apply-seccomp execs the user command with seccomp active
    - User command runs with all sandbox restrictions plus Unix socket creation blocking
 
 **Security limitations**: The filter only blocks `socket(AF_UNIX, ...)` syscalls. It does not prevent operations on Unix socket file descriptors inherited from parent processes or passed via `SCM_RIGHTS`. For most sandboxing scenarios, blocking socket creation is sufficient to prevent unauthorized IPC.
 
-**Minimal runtime dependencies**: Unlike traditional seccomp implementations that require `gcc`, `clang`, and `libseccomp-dev` at runtime, this approach bundles pre-generated BPF filters and uses a Python helper script with standard library `ctypes` to apply them via `prctl()`, eliminating compilation dependencies for end users. Requires Python 3 (typically already installed on Linux systems).
+**Zero runtime dependencies**: Pre-built static apply-seccomp binaries and pre-generated BPF filters are included for x64 and arm64 architectures. No compilation tools or external dependencies required at runtime.
 
-**Fallback mechanism**: If a pre-generated filter isn't available for your platform, the sandbox can fall back to runtime compilation (requires `gcc/clang` and `libseccomp-dev`).
+**Architecture support**: x64 and arm64 are fully supported with pre-built binaries. Other architectures are not currently supported. To use sandboxing without Unix socket blocking on unsupported architectures, set `allowAllUnixSockets: true` in your configuration.
 
 ### Violation Detection and Monitoring
 

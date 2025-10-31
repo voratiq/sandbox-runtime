@@ -51,26 +51,12 @@ function getVendorArchitecture(): string | null {
 }
 
 /**
- * Check if Python 3 is available (synchronous)
- * Python 3 is required for applying seccomp filters via the helper script
- * Memoized to avoid repeated system calls
- */
-export const hasPython3Sync = memoize((): boolean => {
-  try {
-    const result = spawnSync('python3', ['--version'], {
-      stdio: 'ignore',
-      timeout: 1000,
-    })
-    return result.status === 0
-  } catch {
-    return false
-  }
-})
-
-/**
  * Check if seccomp dependencies are available (synchronous)
  * Returns true if (gcc OR clang) AND libseccomp-dev are installed
  * Memoized to avoid repeated system calls
+ *
+ * Note: This is only used for runtime BPF compilation on unsupported architectures.
+ * x64 and arm64 use pre-built binaries and do not require these dependencies.
  */
 export const hasSeccompDependenciesSync = memoize((): boolean => {
   try {

@@ -117,23 +117,26 @@ describe('Pre-generated BPF Support', () => {
     // Check if we have compilation dependencies
     const hasCompilationDeps = hasSeccompDependenciesSync()
 
-    // hasLinuxSandboxDependenciesSync should succeed even without compilation deps
-    // as long as we have bwrap, socat, and Python 3
+    // hasLinuxSandboxDependenciesSync should succeed on x64/arm64
+    // with just bwrap and socat (pre-built binaries included)
     const hasSandboxDeps = hasLinuxSandboxDependenciesSync()
 
-    // On x64/arm64 with pre-generated BPF, we should have sandbox deps
+    // On x64/arm64 with pre-built binaries, we should have sandbox deps
     // regardless of whether compilation deps are available
     const bwrapResult = spawnSync('which', ['bwrap'], { stdio: 'ignore' })
     const socatResult = spawnSync('which', ['socat'], { stdio: 'ignore' })
-    const python3Result = spawnSync('python3', ['--version'], { stdio: 'ignore' })
 
-    if (bwrapResult.status === 0 && socatResult.status === 0 && python3Result.status === 0) {
-      // Basic deps + Python 3 available - should have sandbox deps
-      expect(hasSandboxDeps).toBe(true)
+    if (bwrapResult.status === 0 && socatResult.status === 0) {
+      // Basic deps available - on x64/arm64 this should be sufficient
+      // (pre-built apply-seccomp binaries and BPF filters are included)
+      const arch = process.arch
+      if (arch === 'x64' || arch === 'arm64') {
+        expect(hasSandboxDeps).toBe(true)
+      }
     }
   })
 
-  it('should still require gcc/clang on unsupported architectures', () => {
+  it('should not allow seccomp on unsupported architectures', () => {
     if (skipIfNotLinux()) {
       return
     }
@@ -145,13 +148,21 @@ describe('Pre-generated BPF Support', () => {
       return
     }
 
-    // On architectures without pre-generated BPF, compilation deps are required
-    const hasSandboxDeps = hasLinuxSandboxDependenciesSync()
-    const hasCompilationDeps = hasSeccompDependenciesSync()
+    // On architectures without pre-built apply-seccomp binaries,
+    // hasLinuxSandboxDependenciesSync() should return false
+    // (unless allowAllUnixSockets is set to true)
+    const hasSandboxDeps = hasLinuxSandboxDependenciesSync(false)
 
-    if (hasSandboxDeps) {
-      // If sandbox deps are satisfied, compilation deps must be available
-      expect(hasCompilationDeps).toBe(true)
+    // Unsupported architectures should not have sandbox deps when seccomp is required
+    expect(hasSandboxDeps).toBe(false)
+
+    // But should work when allowAllUnixSockets is true
+    const hasSandboxDepsWithBypass = hasLinuxSandboxDependenciesSync(true)
+    const bwrapResult = spawnSync('which', ['bwrap'], { stdio: 'ignore' })
+    const socatResult = spawnSync('which', ['socat'], { stdio: 'ignore' })
+
+    if (bwrapResult.status === 0 && socatResult.status === 0) {
+      expect(hasSandboxDepsWithBypass).toBe(true)
     }
   })
 })
@@ -322,55 +333,52 @@ describe('Apply Seccomp Helper', () => {
   })
 })
 
-describe('Python 3 Requirement', () => {
-  it('should fail fast when Python 3 is missing and seccomp is needed', async () => {
+describe('Architecture Support', () => {
+  it('should fail fast when architecture is unsupported and seccomp is needed', async () => {
     if (skipIfNotLinux() || skipIfNotAnt()) {
       return
     }
 
-    // Mock scenario where Python is missing
-    // We can't actually remove Python, but we can test the error path
-    // by checking that generateSeccompFilter() returns null when Python is missing
-
     // This test documents the expected behavior:
-    // When Python 3 is unavailable, the sandbox should throw a clear error
-    // instead of silently running without seccomp protection
+    // When the architecture is not x64/arm64, the sandbox should fail the dependency
+    // check instead of silently running without seccomp protection
 
     // The actual check happens in:
-    // 1. generateSeccompFilter() returns null if !hasPython3Sync()
-    // 2. buildSandboxCommand() throws error if getApplySeccompExecPath() returns null
+    // 1. hasLinuxSandboxDependenciesSync() checks for apply-seccomp binary availability
+    // 2. Returns false if binary not available for the current architecture
+    // 3. Error messages guide users to set allowAllUnixSockets: true
     expect(true).toBe(true) // Placeholder - actual behavior verified by integration tests
   })
 
-  it('should include Python 3 in error messages', () => {
+  it('should include architecture information in error messages', () => {
     if (skipIfNotLinux() || skipIfNotAnt()) {
       return
     }
 
-    // Verify error messages mention Python 3 and installation instructions
+    // Verify error messages mention architecture support and alternatives
     // This is a documentation test to ensure error messages are helpful
     const expectedInErrorMessage = [
-      'Python 3',
-      'python3',
-      'apt-get install python3',
+      'x64',
+      'arm64',
+      'architecture',
       'allowAllUnixSockets',
     ]
 
     // Error messages should guide users to either:
-    // 1. Install Python 3, OR
+    // 1. Use a supported architecture (x64/arm64), OR
     // 2. Set allowAllUnixSockets: true to opt out
     expect(expectedInErrorMessage.length).toBeGreaterThan(0)
   })
 
-  it('should allow bypassing Python requirement with allowAllUnixSockets', async () => {
+  it('should allow bypassing architecture requirement with allowAllUnixSockets', async () => {
     if (skipIfNotLinux()) {
       return
     }
 
-    // When allowAllUnixSockets is true, Python 3 should not be required
+    // When allowAllUnixSockets is true, architecture check should not matter
     const testCommand = 'echo "test"'
 
-    // This should NOT throw even if Python is missing (when allowAllUnixSockets=true)
+    // This should NOT throw even on unsupported architecture (when allowAllUnixSockets=true)
     const wrappedCommand = await wrapCommandWithSandboxLinux({
       command: testCommand,
       hasNetworkRestrictions: false,
@@ -378,8 +386,8 @@ describe('Python 3 Requirement', () => {
       allowAllUnixSockets: true, // Bypass seccomp
     })
 
-    // Command should not contain seccomp helper
-    expect(wrappedCommand).not.toContain('apply-seccomp-and-exec')
+    // Command should not contain apply-seccomp binary
+    expect(wrappedCommand).not.toContain('apply-seccomp')
     expect(wrappedCommand).toContain('echo "test"')
   })
 })
