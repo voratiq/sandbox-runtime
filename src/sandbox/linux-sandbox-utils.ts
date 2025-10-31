@@ -45,6 +45,7 @@ export interface LinuxSandboxParams {
   writeConfig?: FsWriteRestrictionConfig
   enableWeakerNestedSandbox?: boolean
   allowAllUnixSockets?: boolean
+  binShell?: string
 }
 
 // Track generated seccomp filters for cleanup on process exit
@@ -493,6 +494,7 @@ export async function wrapCommandWithSandboxLinux(
     writeConfig,
     enableWeakerNestedSandbox,
     allowAllUnixSockets,
+    binShell,
   } = params
 
   // Check if we need any sandboxing
@@ -611,7 +613,9 @@ export async function wrapCommandWithSandboxLinux(
     bwrapArgs.push('--dev', '/dev')
 
     // ========== COMMAND ==========
-    bwrapArgs.push('--', 'bash', '-c')
+    // Use the user's shell (zsh, bash, etc.) to ensure aliases/snapshots work
+    const shell = binShell || 'bash'
+    bwrapArgs.push('--', shell, '-c')
 
     // If we have network restrictions, use the network bridge setup with two-stage seccomp
     // Otherwise, just run the command directly

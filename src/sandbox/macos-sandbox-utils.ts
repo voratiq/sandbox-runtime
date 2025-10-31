@@ -36,6 +36,7 @@ export interface MacOSSandboxParams {
   readConfig: FsReadRestrictionConfig | undefined
   writeConfig: FsWriteRestrictionConfig | undefined
   ignoreViolations?: IgnoreViolationsConfig | undefined
+  binShell?: string
 }
 
 export interface SandboxViolationEvent {
@@ -494,6 +495,7 @@ export async function wrapCommandWithSandboxMacOS(
     allowLocalBinding,
     readConfig,
     writeConfig,
+    binShell,
   } = params
 
   // No sandboxing needed
@@ -518,11 +520,14 @@ export async function wrapCommandWithSandboxMacOS(
   // Generate proxy environment variables using shared utility
   const proxyEnv = `export ${generateProxyEnvVars(httpProxyPort, socksProxyPort).join(' ')} && `
 
+  // Use the user's shell (zsh, bash, etc.) to ensure aliases/snapshots work
+  const shell = binShell || 'bash'
+
   const wrappedCommand = shellquote.quote([
     'sandbox-exec',
     '-p',
     profile,
-    'bash',
+    shell,
     '-c',
     proxyEnv + command,
   ])
