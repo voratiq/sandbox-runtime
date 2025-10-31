@@ -113,15 +113,10 @@ async function main(): Promise<void> {
         try {
           const sanitizedCommand = sanitizeCommandArgs(commandArgs)
 
-          const envDebugValue = process.env.AI_DEBUG?.trim().toLowerCase()
-          const debugFromEnv =
-            envDebugValue === '1' ||
-            envDebugValue === 'true' ||
-            envDebugValue === 'yes'
-          const debugEnabled = Boolean(options.debug) || debugFromEnv
+          const debugEnabled = Boolean(options.debug)
 
-          if (debugEnabled && !process.env.AI_DEBUG) {
-            process.env.AI_DEBUG = '1'
+          if (debugEnabled && !process.env.DEBUG) {
+            process.env.DEBUG = 'true'
           }
 
           const traceId = initializeTelemetry({
