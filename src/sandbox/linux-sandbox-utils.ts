@@ -45,6 +45,7 @@ export interface LinuxSandboxParams {
   writeConfig?: FsWriteRestrictionConfig
   enableWeakerNestedSandbox?: boolean
   allowAllUnixSockets?: boolean
+  binShell?: string
 }
 
 // Track generated seccomp filters for cleanup on process exit
@@ -265,7 +266,10 @@ function buildSandboxCommand(
   socksSocketPath: string,
   userCommand: string,
   seccompFilterPath?: string,
+  shell?: string,
 ): string {
+  // Default to bash for backward compatibility
+  const shellPath = shell || 'bash'
   const socatCommands = [
     `socat TCP-LISTEN:3128,fork,reuseaddr UNIX-CONNECT:${httpSocketPath} >/dev/null 2>&1 &`,
     `socat TCP-LISTEN:1080,fork,reuseaddr UNIX-CONNECT:${socksSocketPath} >/dev/null 2>&1 &`,
@@ -297,13 +301,13 @@ function buildSandboxCommand(
       applySeccompScript,
       seccompFilterPath,
       '--',
-      'bash',
+      shellPath,
       '-c',
       userCommand,
     ])
 
     const innerScript = [...socatCommands, applySeccompCmd].join('\n')
-    return `bash -c ${shellquote.quote([innerScript])}`
+    return `${shellPath} -c ${shellquote.quote([innerScript])}`
   } else {
     // No seccomp filter - run user command directly
     const innerScript = [
@@ -493,6 +497,7 @@ export async function wrapCommandWithSandboxLinux(
     writeConfig,
     enableWeakerNestedSandbox,
     allowAllUnixSockets,
+    binShell,
   } = params
 
   // Check if we need any sandboxing
@@ -611,7 +616,15 @@ export async function wrapCommandWithSandboxLinux(
     bwrapArgs.push('--dev', '/dev')
 
     // ========== COMMAND ==========
-    bwrapArgs.push('--', 'bash', '-c')
+    // Use the user's shell (zsh, bash, etc.) to ensure aliases/snapshots work
+    // Resolve the full path to the shell binary since bwrap doesn't use $PATH
+    const shellName = binShell || 'bash'
+    const shellPathResult = spawnSync('which', [shellName], { encoding: 'utf8' })
+    if (shellPathResult.status !== 0) {
+      throw new Error(`Shell '${shellName}' not found in PATH`)
+    }
+    const shell = shellPathResult.stdout.trim()
+    bwrapArgs.push('--', shell, '-c')
 
     // If we have network restrictions, use the network bridge setup with two-stage seccomp
     // Otherwise, just run the command directly
@@ -623,6 +636,7 @@ export async function wrapCommandWithSandboxLinux(
           socksSocketPath,
           command,
           seccompFilterPath,
+          shell,
         ),
       )
     } else {
