@@ -19,8 +19,6 @@ import {
   generateSeccompFilter,
   cleanupSeccompFilter,
   hasSeccompDependenciesSync,
-  hasPython3Sync,
-  getApplySeccompExecPath,
   getPreGeneratedBpfPath,
 } from './generate-seccomp-filter.js'
 
@@ -75,10 +73,10 @@ function registerSeccompCleanupHandler(): void {
 
 /**
  * Check if Linux sandbox dependencies are available (synchronous)
- * Returns true if bwrap, socat, and python3 are installed.
+ * Returns true if bwrap and socat are installed.
  * Unless allowAllUnixSockets is enabled, also requires seccomp dependencies:
- * - On x64/arm64: Only Python 3 is required (pre-generated BPF filters available)
- * - On other architectures: gcc/clang and libseccomp-dev are required for runtime compilation
+ * - On x64/arm64: Pre-generated BPF filters available, no additional dependencies needed
+ * - On other architectures: gcc/clang and libseccomp-dev are required for runtime BPF compilation
  */
 export function hasLinuxSandboxDependenciesSync(allowAllUnixSockets = false): boolean {
   try {
@@ -93,19 +91,13 @@ export function hasLinuxSandboxDependenciesSync(allowAllUnixSockets = false): bo
 
     const hasBasicDeps = bwrapResult.status === 0 && socatResult.status === 0
 
-    // Python 3 is required for applying seccomp filters (unless Unix socket blocking is disabled)
-    if (!allowAllUnixSockets && !hasPython3Sync()) {
-      return false
-    }
-
     // Also require seccomp dependencies unless allowAllUnixSockets is enabled
     if (!allowAllUnixSockets) {
       // Check if we have a pre-generated BPF filter for this architecture
       const hasPreGeneratedBpf = getPreGeneratedBpfPath() !== null
 
       if (hasPreGeneratedBpf) {
-        // Pre-generated BPF available (x64/arm64) - only Python 3 is required
-        // No need for gcc/clang + libseccomp-dev
+        // Pre-generated BPF available (x64/arm64) - no additional dependencies needed
         return hasBasicDeps
       } else {
         // No pre-generated BPF - need compilation dependencies
@@ -256,18 +248,16 @@ export async function initializeLinuxNetworkBridge(
  * Build the command that runs inside the sandbox.
  * Sets up HTTP proxy on port 3128 and SOCKS proxy on port 1080
  *
- * If seccomp parameters are provided, uses two-stage filtering:
- * 1. Start socat processes (without seccomp filter - they need Unix sockets)
- * 2. Apply seccomp filter using Python script (apply-seccomp-and-exec.py)
- * 3. Exec user command (with seccomp filter active)
+ * Returns both the command string and an optional file descriptor redirect.
+ * The redirect must be applied at the shell level AFTER the command.
  */
 function buildSandboxCommand(
   httpSocketPath: string,
   socksSocketPath: string,
   userCommand: string,
-  seccompFilterPath?: string,
+  seccompFilterPath: string | undefined,
   shell?: string,
-): string {
+): { command: string; fdRedirect?: string } {
   // Default to bash for backward compatibility
   const shellPath = shell || 'bash'
   const socatCommands = [
@@ -276,38 +266,38 @@ function buildSandboxCommand(
     'trap "kill %1 %2 2>/dev/null; exit" EXIT',
   ]
 
-  // If seccomp filter is provided, use Python script to apply it
+  // If seccomp filter is provided, use nested bwrap to apply it
   if (seccompFilterPath) {
-    // Two-stage approach:
-    // 1. Outer bwrap starts socat processes (can use Unix sockets)
-    // 2. Python script applies seccomp filter via prctl and execs user command
+    // Nested bwrap approach:
+    // 1. Outer bwrap/bash: starts socat processes (can use Unix sockets)
+    // 2. Inner bwrap: applies seccomp filter and execs user command
     // 3. User command runs with seccomp active (Unix sockets blocked)
     //
-    // Get the path to the apply-seccomp Python script
-    const applySeccompScript = getApplySeccompExecPath()
-    if (!applySeccompScript) {
-      // Fail fast - seccomp filtering is required for security when enabled
-      throw new Error(
-        'Failed to get apply-seccomp-and-exec.py script. ' +
-          'Python 3 is required for applying seccomp filters but is not available on this system. ' +
-          'Please install Python 3 (e.g., "apt-get install python3" on Ubuntu/Debian). ' +
-          'To disable Unix socket blocking entirely, set allowAllUnixSockets: true in your configuration.',
-      )
-    }
-
-    // Build command: python3 apply-seccomp-and-exec.py <filterPath> -- <userCommand>
-    const applySeccompCmd = shellquote.quote([
-      'python3',
-      applySeccompScript,
-      seccompFilterPath,
+    // The inner bwrap uses --dev-bind / / to inherit the mount namespace from the outer bwrap,
+    // preserving both read-only and writable mounts set up by the outer bwrap.
+    // This allows the inner bwrap to respect the filesystem restrictions already in place.
+    // Use --dev-bind instead of --bind to avoid creating a new user namespace (which fails in CI)
+    // The file descriptor redirect (3< file) must be applied OUTSIDE the quoted bash -c argument
+    // Use --die-with-parent to avoid namespace issues when nested in PID namespace
+    const innerBwrapCmd = shellquote.quote([
+      'bwrap',
+      '--dev-bind', '/', '/',
+      '--seccomp', '3',
+      '--die-with-parent',
       '--',
       shellPath,
       '-c',
       userCommand,
-    ])
+    ]) + ' 3<&3'  // Pass FD 3 from parent shell to inner bwrap
 
-    const innerScript = [...socatCommands, applySeccompCmd].join('\n')
-    return `${shellPath} -c ${shellquote.quote([innerScript])}`
+    const innerScript = [...socatCommands, innerBwrapCmd].join('\n')
+    const command = `${shellPath} -c ${shellquote.quote([innerScript])}`
+
+    // Return command with FD redirect that must be applied at outer shell level
+    return {
+      command,
+      fdRedirect: `3< ${shellquote.quote([seccompFilterPath])}`
+    }
   } else {
     // No seccomp filter - run user command directly
     const innerScript = [
@@ -315,7 +305,9 @@ function buildSandboxCommand(
       `eval ${shellquote.quote([userCommand])}`,
     ].join('\n')
 
-    return `bash -c ${shellquote.quote([innerScript])}`
+    return {
+      command: `${shellPath} -c ${shellquote.quote([innerScript])}`
+    }
   }
 }
 
@@ -439,25 +431,24 @@ async function generateFilesystemArgs(
 /**
  * Wrap a command with sandbox restrictions on Linux
  *
- * UNIX SOCKET BLOCKING (TWO-STAGE SECCOMP):
- * This implementation uses a two-stage seccomp approach to block Unix domain socket
- * creation for user commands while allowing network infrastructure to function:
+ * UNIX SOCKET BLOCKING (NESTED BWRAP WITH SECCOMP):
+ * This implementation uses bubblewrap's built-in --seccomp flag in a nested configuration
+ * to block Unix domain socket creation for user commands while allowing network infrastructure:
  *
- * Stage 1: Network infrastructure setup (NO seccomp filter)
+ * Stage 1: Outer bwrap - Network and filesystem isolation (NO seccomp)
  *   - Bubblewrap starts with isolated network namespace (--unshare-net)
  *   - Bubblewrap applies PID namespace isolation (--unshare-pid and --proc)
- *   - Socat processes start and connect to Unix socket bridges
- *   - These bridges forward traffic to the host's proxy servers
+ *   - Filesystem restrictions are applied (read-only mounts, bind mounts, etc.)
+ *   - Socat processes start and connect to Unix socket bridges (can use socket(AF_UNIX, ...))
  *
- * Stage 2: User command execution (WITH seccomp filter)
- *   - Python script (apply-seccomp-and-exec.py) applies the BPF filter using prctl
- *   - Python script execs the user command with seccomp filter active
- *   - User command inherits all sandbox restrictions from bwrap
- *   - User command cannot create Unix sockets
+ * Stage 2: Inner bwrap - Seccomp filter application (ONLY seccomp)
+ *   - Nested bwrap applies seccomp filter via --seccomp flag (blocks Unix socket creation)
+ *   - Uses --dev-bind / / to inherit mount namespace without creating new user namespace
+ *   - User command executes with seccomp active (cannot create new Unix sockets)
  *
  * This solves the conflict between:
- * - Security: Blocking arbitrary Unix socket access
- * - Functionality: Network sandboxing requires Unix sockets for the proxy bridge
+ * - Security: Blocking arbitrary Unix socket creation in user commands
+ * - Functionality: Network sandboxing requires socat to call socket(AF_UNIX, ...) for bridge connections
  *
  * The seccomp-bpf filter blocks socket(AF_UNIX, ...) syscalls, preventing:
  * - Creating new Unix domain socket file descriptors
@@ -472,13 +463,11 @@ async function generateFilesystemArgs(
  * - All other syscalls
  *
  * PLATFORM NOTE:
- * The allowUnixSockets configuration is still not path-based on Linux (unlike macOS)
- * because seccomp-bpf cannot inspect user-space memory. However, the two-stage
- * approach allows network functionality to work alongside Unix socket creation blocking.
+ * The allowUnixSockets configuration is not path-based on Linux (unlike macOS)
+ * because seccomp-bpf cannot inspect user-space memory to read socket paths.
  *
  * Requirements for seccomp filtering:
  * - Pre-generated BPF filters are included for x64 and ARM64
- * - Python 3 with ctypes (standard library) for applying the filter
  * - For other architectures: gcc or clang + libseccomp-dev for runtime BPF compilation
  * Dependencies are checked by hasLinuxSandboxDependenciesSync() before enabling the sandbox.
  */
@@ -510,13 +499,7 @@ export async function wrapCommandWithSandboxLinux(
 
   try {
     // ========== SECCOMP FILTER (Unix Socket Blocking) ==========
-    // Two-stage seccomp approach for network sandboxing using Python helper script:
-    // 1. Generate the BPF filter that blocks Unix sockets
-    // 2. Outer bwrap: starts socat processes (need Unix sockets for bridging)
-    // 3. Python script: applies seccomp filter via prctl and execs user command
-    // 4. User command runs with seccomp active (Unix sockets blocked)
-    //
-    // This allows network infrastructure to use Unix sockets while blocking them for user commands.
+    // Use bwrap's --seccomp flag to apply BPF filter that blocks Unix socket creation
     //
     // NOTE: Seccomp filtering is only enabled when allowAllUnixSockets is false
     // (when true, Unix sockets are allowed)
@@ -527,7 +510,7 @@ export async function wrapCommandWithSandboxLinux(
         throw new Error(
           'Failed to generate seccomp filter for Unix socket blocking. ' +
             'This may occur on unsupported architectures or when required dependencies are unavailable. ' +
-            'Required: Python 3 with ctypes (standard library), and for non-x64/arm64 architectures: gcc/clang + libseccomp-dev. ' +
+            'Required: For non-x64/arm64 architectures: gcc/clang + libseccomp-dev. ' +
             'To disable Unix socket blocking, set allowAllUnixSockets: true in your configuration.',
         )
       }
@@ -546,17 +529,6 @@ export async function wrapCommandWithSandboxLinux(
       logForDebugging(
         '[Sandbox Linux] Skipping seccomp filter - allowAllUnixSockets is enabled',
       )
-    }
-
-    // By default, always unshare PID namespace and mount fresh /proc.
-    // If we don't have --unshare-pid, it is possible to escape the sandbox.
-    // If we don't have --proc, it is possible to read host /proc and leak information about code running
-    // outside the sandbox. But, --proc is not available when running in unprivileged docker containers
-    // so we support running without it if explicitly requested.
-    bwrapArgs.push('--unshare-pid')
-    if (!enableWeakerNestedSandbox) {
-      // Mount fresh /proc if PID namespace is isolated (secure mode)
-      bwrapArgs.push('--proc', '/proc')
     }
 
     // ========== NETWORK RESTRICTIONS ==========
@@ -615,6 +587,19 @@ export async function wrapCommandWithSandboxLinux(
     // Always bind /dev
     bwrapArgs.push('--dev', '/dev')
 
+    // ========== PID NAMESPACE ISOLATION ==========
+    // IMPORTANT: These must come AFTER filesystem binds for nested bwrap to work
+    // By default, always unshare PID namespace and mount fresh /proc.
+    // If we don't have --unshare-pid, it is possible to escape the sandbox.
+    // If we don't have --proc, it is possible to read host /proc and leak information about code running
+    // outside the sandbox. But, --proc is not available when running in unprivileged docker containers
+    // so we support running without it if explicitly requested.
+    bwrapArgs.push('--unshare-pid')
+    if (!enableWeakerNestedSandbox) {
+      // Mount fresh /proc if PID namespace is isolated (secure mode)
+      bwrapArgs.push('--proc', '/proc')
+    }
+
     // ========== COMMAND ==========
     // Use the user's shell (zsh, bash, etc.) to ensure aliases/snapshots work
     // Resolve the full path to the shell binary since bwrap doesn't use $PATH
@@ -626,24 +611,51 @@ export async function wrapCommandWithSandboxLinux(
     const shell = shellPathResult.stdout.trim()
     bwrapArgs.push('--', shell, '-c')
 
-    // If we have network restrictions, use the network bridge setup with two-stage seccomp
+    // Track if we need to apply a file descriptor redirect at the outer level
+    let outerFdRedirect: string | undefined = undefined
+
+    // If we have network restrictions, use the network bridge setup with nested bwrap for seccomp
     // Otherwise, just run the command directly
     if (hasNetworkRestrictions && httpSocketPath && socksSocketPath) {
-      // Pass seccomp filter to buildSandboxCommand for Python script application
-      bwrapArgs.push(
-        buildSandboxCommand(
-          httpSocketPath,
-          socksSocketPath,
-          command,
-          seccompFilterPath,
-          shell,
-        ),
+      // Pass seccomp filter to buildSandboxCommand for nested bwrap application
+      // This allows socat to start before seccomp is applied
+      const result = buildSandboxCommand(
+        httpSocketPath,
+        socksSocketPath,
+        command,
+        seccompFilterPath,
+        shell,
       )
+      bwrapArgs.push(result.command)
+      outerFdRedirect = result.fdRedirect
+    } else if (seccompFilterPath) {
+      // No network restrictions but we have seccomp - use nested bwrap directly
+      // Build the nested bwrap command with FD redirect
+      // Use --dev-bind / / to inherit mount namespace from outer bwrap (preserves writable mounts)
+      // Use --dev-bind instead of --bind to avoid creating a new user namespace (which fails in CI)
+      // Use --die-with-parent to avoid namespace issues when nested in PID namespace
+      const innerBwrapCmd = shellquote.quote([
+        'bwrap',
+        '--dev-bind', '/', '/',
+        '--seccomp', '3',
+        '--die-with-parent',
+        '--',
+        shell,
+        '-c',
+        command,
+      ]) + ' 3<&3'  // Pass FD 3 from parent
+      bwrapArgs.push(innerBwrapCmd)
+      outerFdRedirect = `3< ${shellquote.quote([seccompFilterPath])}`
     } else {
       bwrapArgs.push(command)
     }
 
-    const wrappedCommand = shellquote.quote(['bwrap', ...bwrapArgs])
+    // Build the outer bwrap command
+    // Apply FD redirect at the end if needed (for seccomp filter)
+    let wrappedCommand = shellquote.quote(['bwrap', ...bwrapArgs])
+    if (outerFdRedirect) {
+      wrappedCommand += ` ${outerFdRedirect}`
+    }
 
     const restrictions = []
     if (hasNetworkRestrictions) restrictions.push('network')
