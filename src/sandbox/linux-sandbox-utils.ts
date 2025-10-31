@@ -614,7 +614,13 @@ export async function wrapCommandWithSandboxLinux(
 
     // ========== COMMAND ==========
     // Use the user's shell (zsh, bash, etc.) to ensure aliases/snapshots work
-    const shell = binShell || 'bash'
+    // Resolve the full path to the shell binary since bwrap doesn't use $PATH
+    const shellName = binShell || 'bash'
+    const shellPathResult = spawnSync('which', [shellName], { encoding: 'utf8' })
+    if (shellPathResult.status !== 0) {
+      throw new Error(`Shell '${shellName}' not found in PATH`)
+    }
+    const shell = shellPathResult.stdout.trim()
     bwrapArgs.push('--', shell, '-c')
 
     // If we have network restrictions, use the network bridge setup with two-stage seccomp
