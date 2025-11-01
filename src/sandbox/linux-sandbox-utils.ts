@@ -18,10 +18,8 @@ import type {
 import {
   generateSeccompFilter,
   cleanupSeccompFilter,
-  hasSeccompDependenciesSync,
-  hasPython3Sync,
-  getApplySeccompExecPath,
   getPreGeneratedBpfPath,
+  getApplySeccompBinaryPath,
 } from './generate-seccomp-filter.js'
 
 export interface LinuxNetworkBridgeContext {
@@ -75,10 +73,10 @@ function registerSeccompCleanupHandler(): void {
 
 /**
  * Check if Linux sandbox dependencies are available (synchronous)
- * Returns true if bwrap, socat, and python3 are installed.
+ * Returns true if bwrap and socat are installed.
  * Unless allowAllUnixSockets is enabled, also requires seccomp dependencies:
- * - On x64/arm64: Only Python 3 is required (pre-generated BPF filters available)
- * - On other architectures: gcc/clang and libseccomp-dev are required for runtime compilation
+ * - On x64/arm64: Pre-generated BPF filters and apply-seccomp binaries available
+ * - On other architectures: Not currently supported (no apply-seccomp binary available)
  */
 export function hasLinuxSandboxDependenciesSync(allowAllUnixSockets = false): boolean {
   try {
@@ -93,24 +91,28 @@ export function hasLinuxSandboxDependenciesSync(allowAllUnixSockets = false): bo
 
     const hasBasicDeps = bwrapResult.status === 0 && socatResult.status === 0
 
-    // Python 3 is required for applying seccomp filters (unless Unix socket blocking is disabled)
-    if (!allowAllUnixSockets && !hasPython3Sync()) {
-      return false
-    }
-
     // Also require seccomp dependencies unless allowAllUnixSockets is enabled
     if (!allowAllUnixSockets) {
       // Check if we have a pre-generated BPF filter for this architecture
       const hasPreGeneratedBpf = getPreGeneratedBpfPath() !== null
 
-      if (hasPreGeneratedBpf) {
-        // Pre-generated BPF available (x64/arm64) - only Python 3 is required
-        // No need for gcc/clang + libseccomp-dev
+      // Check if we have the apply-seccomp binary for this architecture
+      const hasApplySeccompBinary = getApplySeccompBinaryPath() !== null
+
+      if (hasPreGeneratedBpf && hasApplySeccompBinary) {
+        // Pre-generated BPF and apply-seccomp binary available (x64/arm64)
         return hasBasicDeps
       } else {
-        // No pre-generated BPF - need compilation dependencies
-        // This includes gcc/clang + libseccomp-dev for runtime BPF generation
-        return hasBasicDeps && hasSeccompDependenciesSync()
+        // Architecture not supported - no pre-built apply-seccomp binary available
+        // Note: We cannot fall back to runtime BPF compilation because we need
+        // the apply-seccomp binary to actually apply the filter
+        logForDebugging(
+          `[Sandbox Linux] Architecture ${process.arch} is not supported for seccomp filtering. ` +
+          `Only x64 and arm64 are currently supported. To disable Unix socket blocking, ` +
+          `set allowAllUnixSockets: true in your configuration.`,
+          { level: 'warn' },
+        )
+        return false
       }
     }
 
@@ -255,17 +257,12 @@ export async function initializeLinuxNetworkBridge(
 /**
  * Build the command that runs inside the sandbox.
  * Sets up HTTP proxy on port 3128 and SOCKS proxy on port 1080
- *
- * If seccomp parameters are provided, uses two-stage filtering:
- * 1. Start socat processes (without seccomp filter - they need Unix sockets)
- * 2. Apply seccomp filter using Python script (apply-seccomp-and-exec.py)
- * 3. Exec user command (with seccomp filter active)
  */
 function buildSandboxCommand(
   httpSocketPath: string,
   socksSocketPath: string,
   userCommand: string,
-  seccompFilterPath?: string,
+  seccompFilterPath: string | undefined,
   shell?: string,
 ): string {
   // Default to bash for backward compatibility
@@ -276,31 +273,30 @@ function buildSandboxCommand(
     'trap "kill %1 %2 2>/dev/null; exit" EXIT',
   ]
 
-  // If seccomp filter is provided, use Python script to apply it
+  // If seccomp filter is provided, use apply-seccomp to apply it
   if (seccompFilterPath) {
-    // Two-stage approach:
-    // 1. Outer bwrap starts socat processes (can use Unix sockets)
-    // 2. Python script applies seccomp filter via prctl and execs user command
+    // apply-seccomp approach:
+    // 1. Outer bwrap/bash: starts socat processes (can use Unix sockets)
+    // 2. apply-seccomp: applies seccomp filter and execs user command
     // 3. User command runs with seccomp active (Unix sockets blocked)
     //
-    // Get the path to the apply-seccomp Python script
-    const applySeccompScript = getApplySeccompExecPath()
-    if (!applySeccompScript) {
-      // Fail fast - seccomp filtering is required for security when enabled
+    // apply-seccomp is a simple C program that:
+    // - Sets PR_SET_NO_NEW_PRIVS
+    // - Applies the seccomp BPF filter via prctl(PR_SET_SECCOMP)
+    // - Execs the user command
+    //
+    // This is simpler and more portable than nested bwrap, with no FD redirects needed.
+    const applySeccompBinary = getApplySeccompBinaryPath()
+    if (!applySeccompBinary) {
       throw new Error(
-        'Failed to get apply-seccomp-and-exec.py script. ' +
-          'Python 3 is required for applying seccomp filters but is not available on this system. ' +
-          'Please install Python 3 (e.g., "apt-get install python3" on Ubuntu/Debian). ' +
-          'To disable Unix socket blocking entirely, set allowAllUnixSockets: true in your configuration.',
+        'apply-seccomp binary not found. This should have been caught earlier. ' +
+        'Ensure vendor/seccomp/{x64,arm64}/apply-seccomp binaries are included in the package.',
       )
     }
 
-    // Build command: python3 apply-seccomp-and-exec.py <filterPath> -- <userCommand>
     const applySeccompCmd = shellquote.quote([
-      'python3',
-      applySeccompScript,
+      applySeccompBinary,
       seccompFilterPath,
-      '--',
       shellPath,
       '-c',
       userCommand,
@@ -315,7 +311,7 @@ function buildSandboxCommand(
       `eval ${shellquote.quote([userCommand])}`,
     ].join('\n')
 
-    return `bash -c ${shellquote.quote([innerScript])}`
+    return `${shellPath} -c ${shellquote.quote([innerScript])}`
   }
 }
 
@@ -439,25 +435,24 @@ async function generateFilesystemArgs(
 /**
  * Wrap a command with sandbox restrictions on Linux
  *
- * UNIX SOCKET BLOCKING (TWO-STAGE SECCOMP):
- * This implementation uses a two-stage seccomp approach to block Unix domain socket
- * creation for user commands while allowing network infrastructure to function:
+ * UNIX SOCKET BLOCKING (APPLY-SECCOMP):
+ * This implementation uses a custom apply-seccomp binary to block Unix domain socket
+ * creation for user commands while allowing network infrastructure:
  *
- * Stage 1: Network infrastructure setup (NO seccomp filter)
+ * Stage 1: Outer bwrap - Network and filesystem isolation (NO seccomp)
  *   - Bubblewrap starts with isolated network namespace (--unshare-net)
  *   - Bubblewrap applies PID namespace isolation (--unshare-pid and --proc)
- *   - Socat processes start and connect to Unix socket bridges
- *   - These bridges forward traffic to the host's proxy servers
+ *   - Filesystem restrictions are applied (read-only mounts, bind mounts, etc.)
+ *   - Socat processes start and connect to Unix socket bridges (can use socket(AF_UNIX, ...))
  *
- * Stage 2: User command execution (WITH seccomp filter)
- *   - Python script (apply-seccomp-and-exec.py) applies the BPF filter using prctl
- *   - Python script execs the user command with seccomp filter active
- *   - User command inherits all sandbox restrictions from bwrap
- *   - User command cannot create Unix sockets
+ * Stage 2: apply-seccomp - Seccomp filter application (ONLY seccomp)
+ *   - apply-seccomp binary applies seccomp filter via prctl(PR_SET_SECCOMP)
+ *   - Sets PR_SET_NO_NEW_PRIVS to allow seccomp without root
+ *   - Execs user command with seccomp active (cannot create new Unix sockets)
  *
  * This solves the conflict between:
- * - Security: Blocking arbitrary Unix socket access
- * - Functionality: Network sandboxing requires Unix sockets for the proxy bridge
+ * - Security: Blocking arbitrary Unix socket creation in user commands
+ * - Functionality: Network sandboxing requires socat to call socket(AF_UNIX, ...) for bridge connections
  *
  * The seccomp-bpf filter blocks socket(AF_UNIX, ...) syscalls, preventing:
  * - Creating new Unix domain socket file descriptors
@@ -472,14 +467,15 @@ async function generateFilesystemArgs(
  * - All other syscalls
  *
  * PLATFORM NOTE:
- * The allowUnixSockets configuration is still not path-based on Linux (unlike macOS)
- * because seccomp-bpf cannot inspect user-space memory. However, the two-stage
- * approach allows network functionality to work alongside Unix socket creation blocking.
+ * The allowUnixSockets configuration is not path-based on Linux (unlike macOS)
+ * because seccomp-bpf cannot inspect user-space memory to read socket paths.
  *
  * Requirements for seccomp filtering:
+ * - Pre-built apply-seccomp binaries are included for x64 and ARM64
  * - Pre-generated BPF filters are included for x64 and ARM64
- * - Python 3 with ctypes (standard library) for applying the filter
- * - For other architectures: gcc or clang + libseccomp-dev for runtime BPF compilation
+ * - Other architectures are not currently supported (no apply-seccomp binary available)
+ * - To use sandboxing without Unix socket blocking on unsupported architectures,
+ *   set allowAllUnixSockets: true in your configuration
  * Dependencies are checked by hasLinuxSandboxDependenciesSync() before enabling the sandbox.
  */
 export async function wrapCommandWithSandboxLinux(
@@ -510,13 +506,7 @@ export async function wrapCommandWithSandboxLinux(
 
   try {
     // ========== SECCOMP FILTER (Unix Socket Blocking) ==========
-    // Two-stage seccomp approach for network sandboxing using Python helper script:
-    // 1. Generate the BPF filter that blocks Unix sockets
-    // 2. Outer bwrap: starts socat processes (need Unix sockets for bridging)
-    // 3. Python script: applies seccomp filter via prctl and execs user command
-    // 4. User command runs with seccomp active (Unix sockets blocked)
-    //
-    // This allows network infrastructure to use Unix sockets while blocking them for user commands.
+    // Use bwrap's --seccomp flag to apply BPF filter that blocks Unix socket creation
     //
     // NOTE: Seccomp filtering is only enabled when allowAllUnixSockets is false
     // (when true, Unix sockets are allowed)
@@ -526,8 +516,7 @@ export async function wrapCommandWithSandboxLinux(
         // Fail loudly - seccomp filtering is required for security
         throw new Error(
           'Failed to generate seccomp filter for Unix socket blocking. ' +
-            'This may occur on unsupported architectures or when required dependencies are unavailable. ' +
-            'Required: Python 3 with ctypes (standard library), and for non-x64/arm64 architectures: gcc/clang + libseccomp-dev. ' +
+            'This may occur on unsupported architectures (only x64 and arm64 are currently supported). ' +
             'To disable Unix socket blocking, set allowAllUnixSockets: true in your configuration.',
         )
       }
@@ -546,17 +535,6 @@ export async function wrapCommandWithSandboxLinux(
       logForDebugging(
         '[Sandbox Linux] Skipping seccomp filter - allowAllUnixSockets is enabled',
       )
-    }
-
-    // By default, always unshare PID namespace and mount fresh /proc.
-    // If we don't have --unshare-pid, it is possible to escape the sandbox.
-    // If we don't have --proc, it is possible to read host /proc and leak information about code running
-    // outside the sandbox. But, --proc is not available when running in unprivileged docker containers
-    // so we support running without it if explicitly requested.
-    bwrapArgs.push('--unshare-pid')
-    if (!enableWeakerNestedSandbox) {
-      // Mount fresh /proc if PID namespace is isolated (secure mode)
-      bwrapArgs.push('--proc', '/proc')
     }
 
     // ========== NETWORK RESTRICTIONS ==========
@@ -615,6 +593,19 @@ export async function wrapCommandWithSandboxLinux(
     // Always bind /dev
     bwrapArgs.push('--dev', '/dev')
 
+    // ========== PID NAMESPACE ISOLATION ==========
+    // IMPORTANT: These must come AFTER filesystem binds for nested bwrap to work
+    // By default, always unshare PID namespace and mount fresh /proc.
+    // If we don't have --unshare-pid, it is possible to escape the sandbox.
+    // If we don't have --proc, it is possible to read host /proc and leak information about code running
+    // outside the sandbox. But, --proc is not available when running in unprivileged docker containers
+    // so we support running without it if explicitly requested.
+    bwrapArgs.push('--unshare-pid')
+    if (!enableWeakerNestedSandbox) {
+      // Mount fresh /proc if PID namespace is isolated (secure mode)
+      bwrapArgs.push('--proc', '/proc')
+    }
+
     // ========== COMMAND ==========
     // Use the user's shell (zsh, bash, etc.) to ensure aliases/snapshots work
     // Resolve the full path to the shell binary since bwrap doesn't use $PATH
@@ -626,23 +617,43 @@ export async function wrapCommandWithSandboxLinux(
     const shell = shellPathResult.stdout.trim()
     bwrapArgs.push('--', shell, '-c')
 
-    // If we have network restrictions, use the network bridge setup with two-stage seccomp
-    // Otherwise, just run the command directly
+    // If we have network restrictions, use the network bridge setup with apply-seccomp for seccomp
+    // Otherwise, just run the command directly with apply-seccomp if needed
     if (hasNetworkRestrictions && httpSocketPath && socksSocketPath) {
-      // Pass seccomp filter to buildSandboxCommand for Python script application
-      bwrapArgs.push(
-        buildSandboxCommand(
-          httpSocketPath,
-          socksSocketPath,
-          command,
-          seccompFilterPath,
-          shell,
-        ),
+      // Pass seccomp filter to buildSandboxCommand for apply-seccomp application
+      // This allows socat to start before seccomp is applied
+      const sandboxCommand = buildSandboxCommand(
+        httpSocketPath,
+        socksSocketPath,
+        command,
+        seccompFilterPath,
+        shell,
       )
+      bwrapArgs.push(sandboxCommand)
+    } else if (seccompFilterPath) {
+      // No network restrictions but we have seccomp - use apply-seccomp directly
+      // apply-seccomp is a simple C program that applies the seccomp filter and execs the command
+      const applySeccompBinary = getApplySeccompBinaryPath()
+      if (!applySeccompBinary) {
+        throw new Error(
+          'apply-seccomp binary not found. This should have been caught earlier. ' +
+          'Ensure vendor/seccomp/{x64,arm64}/apply-seccomp binaries are included in the package.',
+        )
+      }
+
+      const applySeccompCmd = shellquote.quote([
+        applySeccompBinary,
+        seccompFilterPath,
+        shell,
+        '-c',
+        command,
+      ])
+      bwrapArgs.push(applySeccompCmd)
     } else {
       bwrapArgs.push(command)
     }
 
+    // Build the outer bwrap command
     const wrappedCommand = shellquote.quote(['bwrap', ...bwrapArgs])
 
     const restrictions = []
