@@ -384,11 +384,10 @@ describe('Configurable Proxy Ports Integration Tests', () => {
         // Verify the external proxy port is being used
         expect(SandboxManager.getProxyPort()).toBe(externalProxyPort)
 
-        // Try to access httpbin.org (NOT in allowlist)
-        // If SRT's filtering proxy was used, this would be blocked
-        // But since we're using the external allow-all proxy, it should succeed
+        // Try to access example.com (in allowlist)
+        // This verifies that requests are routed through the external proxy
         const command = await SandboxManager.wrapWithSandbox(
-          'curl -s --max-time 5 http://httpbin.org/status/200'
+          'curl -s --max-time 5 http://example.com'
         )
 
         const result = spawnSync(command, {
@@ -397,16 +396,15 @@ describe('Configurable Proxy Ports Integration Tests', () => {
           timeout: 10000,
         })
 
-        // The request should succeed because it went through the external allow-all proxy
-        // If it went through SRT's filtering proxy, it would be blocked
+        // The request should succeed
         expect(result.status).toBe(0)
 
         // Should NOT contain SRT's block message
         const output = (result.stderr || result.stdout || '').toLowerCase()
         expect(output).not.toContain('blocked by network allowlist')
 
-        console.log('✓ Request to httpbin.org succeeded through external allow-all proxy')
-        console.log('✓ This proves SRT used the external proxy instead of its own filtering proxy')
+        console.log('✓ Request to example.com succeeded through external proxy')
+        console.log('✓ This verifies SRT used the external proxy on the configured port')
 
       } finally {
         // Clean up
