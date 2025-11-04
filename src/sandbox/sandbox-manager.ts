@@ -32,8 +32,6 @@ interface HostNetworkManagerContext {
   httpProxyPort: number
   socksProxyPort: number
   linuxBridge: LinuxNetworkBridgeContext | undefined
-  httpProxyIsLocal: boolean
-  socksProxyIsLocal: boolean
 }
 
 // ============================================================================
@@ -223,29 +221,23 @@ async function initialize(
     try {
       // Conditionally start proxy servers based on config
       let httpProxyPort: number
-      let httpProxyIsLocal: boolean
       if (config.network.httpProxyPort !== undefined) {
-        // Use external HTTP proxy
+        // Use external HTTP proxy (don't start a server)
         httpProxyPort = config.network.httpProxyPort
-        httpProxyIsLocal = false
         logForDebugging(`Using external HTTP proxy on port ${httpProxyPort}`)
       } else {
         // Start local HTTP proxy
         httpProxyPort = await startHttpProxyServer(sandboxAskCallback)
-        httpProxyIsLocal = true
       }
 
       let socksProxyPort: number
-      let socksProxyIsLocal: boolean
       if (config.network.socksProxyPort !== undefined) {
-        // Use external SOCKS proxy
+        // Use external SOCKS proxy (don't start a server)
         socksProxyPort = config.network.socksProxyPort
-        socksProxyIsLocal = false
         logForDebugging(`Using external SOCKS proxy on port ${socksProxyPort}`)
       } else {
         // Start local SOCKS proxy
         socksProxyPort = await startSocksProxyServer(sandboxAskCallback)
-        socksProxyIsLocal = true
       }
 
       // Initialize platform-specific infrastructure
@@ -261,8 +253,6 @@ async function initialize(
         httpProxyPort,
         socksProxyPort,
         linuxBridge,
-        httpProxyIsLocal,
-        socksProxyIsLocal,
       }
       managerContext = context
       logForDebugging('Network infrastructure initialized')
@@ -591,10 +581,10 @@ async function reset(): Promise<void> {
     }
   }
 
-  // Close servers in parallel (only if they were started locally)
+  // Close servers in parallel (only if they exist, i.e., were started by us)
   const closePromises: Promise<void>[] = []
 
-  if (httpProxyServer && managerContext?.httpProxyIsLocal) {
+  if (httpProxyServer) {
     const server = httpProxyServer // Capture reference to avoid TypeScript error
     const httpClose = new Promise<void>(resolve => {
       server.close(error => {
@@ -609,7 +599,7 @@ async function reset(): Promise<void> {
     closePromises.push(httpClose)
   }
 
-  if (socksProxyServer && managerContext?.socksProxyIsLocal) {
+  if (socksProxyServer) {
     const socksClose = socksProxyServer.close().catch((error: Error) => {
       logForDebugging(`Error closing SOCKS proxy server: ${error.message}`, {
         level: 'error',
