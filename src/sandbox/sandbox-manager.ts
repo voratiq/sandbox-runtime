@@ -219,11 +219,26 @@ async function initialize(
   // Initialize network infrastructure
   initializationPromise = (async () => {
     try {
-      // Start proxy servers in parallel
-      const [httpProxyPort, socksProxyPort] = await Promise.all([
-        startHttpProxyServer(sandboxAskCallback),
-        startSocksProxyServer(sandboxAskCallback),
-      ])
+      // Conditionally start proxy servers based on config
+      let httpProxyPort: number
+      if (config.network.httpProxyPort !== undefined) {
+        // Use external HTTP proxy (don't start a server)
+        httpProxyPort = config.network.httpProxyPort
+        logForDebugging(`Using external HTTP proxy on port ${httpProxyPort}`)
+      } else {
+        // Start local HTTP proxy
+        httpProxyPort = await startHttpProxyServer(sandboxAskCallback)
+      }
+
+      let socksProxyPort: number
+      if (config.network.socksProxyPort !== undefined) {
+        // Use external SOCKS proxy (don't start a server)
+        socksProxyPort = config.network.socksProxyPort
+        logForDebugging(`Using external SOCKS proxy on port ${socksProxyPort}`)
+      } else {
+        // Start local SOCKS proxy
+        socksProxyPort = await startSocksProxyServer(sandboxAskCallback)
+      }
 
       // Initialize platform-specific infrastructure
       let linuxBridge: LinuxNetworkBridgeContext | undefined
@@ -566,7 +581,7 @@ async function reset(): Promise<void> {
     }
   }
 
-  // Close servers in parallel
+  // Close servers in parallel (only if they exist, i.e., were started by us)
   const closePromises: Promise<void>[] = []
 
   if (httpProxyServer) {

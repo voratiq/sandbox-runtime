@@ -59,6 +59,8 @@ export const NetworkConfigSchema = z.object({
   allowUnixSockets: z.array(z.string()).optional().describe('Unix socket paths that are allowed (macOS only)'),
   allowAllUnixSockets: z.boolean().optional().describe('Allow ALL Unix sockets (Linux only - disables Unix socket blocking)'),
   allowLocalBinding: z.boolean().optional().describe('Whether to allow binding to local ports (default: false)'),
+  httpProxyPort: z.number().int().min(1).max(65535).optional().describe('Port of an external HTTP proxy to use instead of starting a local one. When provided, the library will skip starting its own HTTP proxy and use this port. The external proxy must handle domain filtering.'),
+  socksProxyPort: z.number().int().min(1).max(65535).optional().describe('Port of an external SOCKS proxy to use instead of starting a local one. When provided, the library will skip starting its own SOCKS proxy and use this port. The external proxy must handle domain filtering.'),
 })
 
 /**
