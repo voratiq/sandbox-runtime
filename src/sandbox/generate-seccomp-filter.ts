@@ -34,7 +34,7 @@ function getVendorArchitecture(): string | null {
       // Until then, 32-bit x86 is not supported to avoid a security bypass.
       logForDebugging(
         `[SeccompFilter] 32-bit x86 (ia32) is not currently supported due to missing socketcall() syscall blocking. ` +
-        `The current seccomp filter only blocks socket(AF_UNIX, ...), but on 32-bit x86, socketcall() can be used to bypass this.`,
+          `The current seccomp filter only blocks socket(AF_UNIX, ...), but on 32-bit x86, socketcall() can be used to bypass this.`,
         { level: 'error' },
       )
       return null
@@ -45,7 +45,6 @@ function getVendorArchitecture(): string | null {
       return null
   }
 }
-
 
 /**
  * Get the path to a pre-generated BPF filter file from the vendor directory
@@ -59,7 +58,6 @@ function getVendorArchitecture(): string | null {
  * 2. ../vendor/seccomp/{arch}/unix-block.bpf (dist/vendor - for bundlers)
  */
 export function getPreGeneratedBpfPath(): string | null {
-
   // Determine architecture
   const arch = getVendorArchitecture()
   if (!arch) {
@@ -79,7 +77,7 @@ export function getPreGeneratedBpfPath(): string | null {
   // Try paths in order of preference
   const pathsToTry = [
     join(baseDir, '..', '..', relativePath), // package root: vendor/seccomp/...
-    join(baseDir, '..', relativePath),       // dist: dist/vendor/seccomp/...
+    join(baseDir, '..', relativePath), // dist: dist/vendor/seccomp/...
   ]
 
   for (const bpfPath of pathsToTry) {
@@ -118,7 +116,9 @@ export function getApplySeccompBinaryPath(): string | null {
     return null
   }
 
-  logForDebugging(`[SeccompFilter] Looking for apply-seccomp binary for architecture: ${arch}`)
+  logForDebugging(
+    `[SeccompFilter] Looking for apply-seccomp binary for architecture: ${arch}`,
+  )
 
   // Try to locate the binary with fallback paths
   // Path is relative to the compiled code location (dist/sandbox/)
@@ -128,7 +128,7 @@ export function getApplySeccompBinaryPath(): string | null {
   // Try paths in order of preference
   const pathsToTry = [
     join(baseDir, '..', '..', relativePath), // package root: vendor/seccomp/...
-    join(baseDir, '..', relativePath),       // dist: dist/vendor/seccomp/...
+    join(baseDir, '..', relativePath), // dist: dist/vendor/seccomp/...
   ]
 
   for (const binaryPath of pathsToTry) {
@@ -145,7 +145,6 @@ export function getApplySeccompBinaryPath(): string | null {
   )
   return null
 }
-
 
 /**
  * Get the path to a pre-generated seccomp BPF filter that blocks Unix domain socket creation
@@ -194,4 +193,3 @@ export function generateSeccompFilter(): string | null {
 export function cleanupSeccompFilter(_filterPath: string): void {
   // No-op: pre-generated BPF files are never cleaned up
 }
-

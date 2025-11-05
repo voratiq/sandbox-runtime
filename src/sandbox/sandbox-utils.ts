@@ -90,7 +90,7 @@ export function normalizePathForSandbox(pathPattern: string): string {
   // For glob patterns, resolve symlinks for the directory portion only
   if (containsGlobChars(normalizedPath)) {
     // Extract the static directory prefix before glob characters
-    const staticPrefix = normalizedPath.split(/[*?\[\]]/)[ 0]
+    const staticPrefix = normalizedPath.split(/[*?[\]]/)[0]
     if (staticPrefix && staticPrefix !== '/') {
       // Get the directory containing the glob pattern
       // If staticPrefix ends with /, remove it to get the directory
@@ -151,8 +151,11 @@ export function getDefaultWritePaths(): string[] {
  * Get mandatory deny paths within allowed write areas
  * This uses ripgrep to scan the filesystem for dangerous files and directories
  * Returns absolute paths that must be blocked from writes
+ * @param ripgrepConfig Ripgrep configuration (command and optional args)
  */
-export async function getMandatoryDenyWithinAllow(): Promise<string[]> {
+export async function getMandatoryDenyWithinAllow(
+  ripgrepConfig: { command: string; args?: string[] } = { command: 'rg' },
+): Promise<string[]> {
   const denyPaths: string[] = []
   const cwd = process.cwd()
 
@@ -202,6 +205,7 @@ export async function getMandatoryDenyWithinAllow(): Promise<string[]> {
         ],
         cwd,
         abortController.signal,
+        ripgrepConfig,
       )
       // Convert relative paths to absolute paths
       const absoluteMatches = matches.map(match => path.resolve(cwd, match))
@@ -237,6 +241,7 @@ export async function getMandatoryDenyWithinAllow(): Promise<string[]> {
         ],
         cwd,
         abortController.signal,
+        ripgrepConfig,
       )
 
       // Extract directory paths from file paths
@@ -292,6 +297,7 @@ export async function getMandatoryDenyWithinAllow(): Promise<string[]> {
         ],
         cwd,
         abortController.signal,
+        ripgrepConfig,
       )
 
       for (const gitHeadFile of gitHeadFiles) {

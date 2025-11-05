@@ -2,7 +2,6 @@ import shellquote from 'shell-quote'
 import { spawn, spawnSync } from 'child_process'
 import * as path from 'path'
 import { logForDebugging } from '../utils/debug.js'
-import { hasRipgrepSync } from '../utils/ripgrep.js'
 import {
   normalizePathForSandbox,
   generateProxyEnvVars,
@@ -17,15 +16,6 @@ import type {
 } from './sandbox-schemas.js'
 import type { IgnoreViolationsConfig } from './sandbox-config.js'
 
-/**
- * Check if macOS sandbox dependencies are available (synchronous)
- * Returns true if rg (ripgrep) is installed, false otherwise
- * Cached to avoid repeated system calls
- */
-export function hasMacOSSandboxDependenciesSync(): boolean {
-  return hasRipgrepSync()
-}
-
 export interface MacOSSandboxParams {
   command: string
   httpProxyPort?: number
@@ -38,6 +28,7 @@ export interface MacOSSandboxParams {
   writeConfig: FsWriteRestrictionConfig | undefined
   ignoreViolations?: IgnoreViolationsConfig | undefined
   binShell?: string
+  ripgrepConfig?: { command: string; args?: string[] }
 }
 
 export interface SandboxViolationEvent {
@@ -151,7 +142,7 @@ function generateMoveBlockingRules(
 
       // For glob patterns, extract the static prefix and block ancestor moves
       // Remove glob characters to get the directory prefix
-      const staticPrefix = normalizedPath.split(/[*?\[\]]/)[0]
+      const staticPrefix = normalizedPath.split(/[*?[\]]/)[0]
       if (staticPrefix && staticPrefix !== '/') {
         // Get the directory containing the glob pattern
         const baseDir = staticPrefix.endsWith('/')
@@ -248,6 +239,7 @@ function generateReadRules(
 async function generateWriteRules(
   config: FsWriteRestrictionConfig | undefined,
   logTag: string,
+  ripgrepConfig: { command: string; args?: string[] } = { command: 'rg' },
 ): Promise<string[]> {
   if (!config) {
     return [`(allow file-write*)`]
@@ -291,7 +283,7 @@ async function generateWriteRules(
   // Combine user-specified and mandatory deny rules
   const denyPaths = [
     ...(config.denyWithinAllow || []),
-    ...(await getMandatoryDenyWithinAllow()),
+    ...(await getMandatoryDenyWithinAllow(ripgrepConfig)),
   ]
 
   for (const pathPattern of denyPaths) {
@@ -334,6 +326,7 @@ async function generateSandboxProfile({
   allowAllUnixSockets,
   allowLocalBinding,
   logTag,
+  ripgrepConfig = { command: 'rg' },
 }: {
   readConfig: FsReadRestrictionConfig | undefined
   writeConfig: FsWriteRestrictionConfig | undefined
@@ -344,6 +337,7 @@ async function generateSandboxProfile({
   allowAllUnixSockets?: boolean
   allowLocalBinding?: boolean
   logTag: string
+  ripgrepConfig?: { command: string; args?: string[] }
 }): Promise<string> {
   const profile: string[] = [
     '(version 1)',
@@ -548,7 +542,9 @@ async function generateSandboxProfile({
 
   // Write rules
   profile.push('; File write')
-  profile.push(...(await generateWriteRules(writeConfig, logTag)))
+  profile.push(
+    ...(await generateWriteRules(writeConfig, logTag, ripgrepConfig)),
+  )
 
   return profile.join('\n')
 }
@@ -602,6 +598,7 @@ export async function wrapCommandWithSandboxMacOS(
     readConfig,
     writeConfig,
     binShell,
+    ripgrepConfig = { command: 'rg' },
   } = params
 
   // No sandboxing needed
@@ -621,6 +618,7 @@ export async function wrapCommandWithSandboxMacOS(
     allowAllUnixSockets,
     allowLocalBinding,
     logTag,
+    ripgrepConfig,
   })
 
   // Generate proxy environment variables using shared utility

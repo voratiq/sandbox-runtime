@@ -157,4 +157,72 @@ describe('Config Validation', () => {
       expect(result.success).toBe(false)
     }
   })
+
+  test('should validate config with custom ripgrep command', () => {
+    const config = {
+      network: {
+        allowedDomains: [],
+        deniedDomains: [],
+      },
+      filesystem: {
+        denyRead: [],
+        allowWrite: [],
+        denyWrite: [],
+      },
+      ripgrep: {
+        command: '/usr/local/bin/rg',
+      },
+    }
+
+    const result = SandboxRuntimeConfigSchema.safeParse(config)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.ripgrep?.command).toBe('/usr/local/bin/rg')
+    }
+  })
+
+  test('should validate config with custom ripgrep command and args', () => {
+    const config = {
+      network: {
+        allowedDomains: [],
+        deniedDomains: [],
+      },
+      filesystem: {
+        denyRead: [],
+        allowWrite: [],
+        denyWrite: [],
+      },
+      ripgrep: {
+        command: 'claude',
+        args: ['--ripgrep'],
+      },
+    }
+
+    const result = SandboxRuntimeConfigSchema.safeParse(config)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.ripgrep?.command).toBe('claude')
+      expect(result.data.ripgrep?.args).toEqual(['--ripgrep'])
+    }
+  })
+
+  test('should use default ripgrep command when not specified', () => {
+    const config = {
+      network: {
+        allowedDomains: [],
+        deniedDomains: [],
+      },
+      filesystem: {
+        denyRead: [],
+        allowWrite: [],
+        denyWrite: [],
+      },
+    }
+
+    const result = SandboxRuntimeConfigSchema.safeParse(config)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.ripgrep).toBeUndefined()
+    }
+  })
 })

@@ -2,29 +2,24 @@ import { spawnSync } from 'child_process'
 import { execFile } from 'child_process'
 import type { ExecFileException } from 'child_process'
 
-// Cache for ripgrep availability check
-let ripgrepCache: boolean | undefined
+export interface RipgrepConfig {
+  command: string
+  args?: string[]
+}
 
 /**
  * Check if ripgrep (rg) is available synchronously
  * Returns true if rg is installed, false otherwise
- * Cached to avoid repeated system calls
  */
 export function hasRipgrepSync(): boolean {
-  if (ripgrepCache !== undefined) {
-    return ripgrepCache
-  }
-
   try {
     const result = spawnSync('which', ['rg'], {
       stdio: 'ignore',
       timeout: 1000,
     })
 
-    ripgrepCache = result.status === 0
-    return ripgrepCache
+    return result.status === 0
   } catch {
-    ripgrepCache = false
     return false
   }
 }
@@ -34,6 +29,7 @@ export function hasRipgrepSync(): boolean {
  * @param args Command-line arguments to pass to rg
  * @param target Target directory or file to search
  * @param abortSignal AbortSignal to cancel the operation
+ * @param config Ripgrep configuration (command and optional args)
  * @returns Array of matching lines (one per line of output)
  * @throws Error if ripgrep exits with non-zero status (except exit code 1 which means no matches)
  */
@@ -41,11 +37,14 @@ export async function ripGrep(
   args: string[],
   target: string,
   abortSignal: AbortSignal,
+  config: RipgrepConfig = { command: 'rg' },
 ): Promise<string[]> {
+  const { command, args: commandArgs = [] } = config
+
   return new Promise((resolve, reject) => {
     execFile(
-      'rg',
-      [...args, target],
+      command,
+      [...commandArgs, ...args, target],
       {
         maxBuffer: 20_000_000, // 20MB
         signal: abortSignal,
