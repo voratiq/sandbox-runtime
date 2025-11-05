@@ -15,6 +15,7 @@ import {
   wrapCommandWithSandboxLinux,
   initializeLinuxNetworkBridge,
   type LinuxNetworkBridgeContext,
+  hasLinuxSandboxDependenciesSync,
 } from './linux-sandbox-utils.js'
 import {
   wrapCommandWithSandboxMacOS,
@@ -25,6 +26,7 @@ import {
   containsGlobChars,
   removeTrailingGlobSuffix,
 } from './sandbox-utils.js'
+import { hasRipgrepSync } from '../utils/ripgrep.js'
 import { SandboxViolationStore } from './sandbox-violation-store.js'
 import { EOL } from 'node:os'
 
@@ -46,6 +48,7 @@ let initializationPromise: Promise<HostNetworkManagerContext> | undefined
 let cleanupRegistered = false
 let logMonitorShutdown: (() => void) | undefined
 const sandboxViolationStore = new SandboxViolationStore()
+let dependenciesCheckCache: boolean | undefined
 
 // ============================================================================
 // Private Helper Functions (not exported)
@@ -283,6 +286,47 @@ function isSandboxingEnabled(): boolean {
   return config !== undefined
 }
 
+/**
+ * Check if all sandbox dependencies are available for the current platform
+ * @returns true if all dependencies are available, false otherwise
+ */
+function checkDependencies(): boolean {
+  // Return cached result if available
+  if (dependenciesCheckCache !== undefined) {
+    return dependenciesCheckCache
+  }
+
+  const platform = getPlatform()
+
+  // Check platform support
+  if (!isSupportedPlatform(platform)) {
+    dependenciesCheckCache = false
+    return false
+  }
+
+  // Check ripgrep - only check 'rg' if no custom command is configured
+  // If custom command is provided, we trust it exists (will fail naturally if not)
+  const hasCustomRipgrep = config?.ripgrep?.command !== undefined
+  if (!hasCustomRipgrep) {
+    // Only check for default 'rg' command
+    if (!hasRipgrepSync()) {
+      dependenciesCheckCache = false
+      return false
+    }
+  }
+
+  // Platform-specific dependency checks
+  if (platform === 'linux') {
+    const allowAllUnixSockets = config?.network?.allowAllUnixSockets ?? false
+    const result = hasLinuxSandboxDependenciesSync(allowAllUnixSockets)
+    dependenciesCheckCache = result
+    return result
+  }
+
+  // macOS only needs ripgrep (already checked above)
+  dependenciesCheckCache = true
+  return true
+}
 
 function getFsReadConfig(): FsReadRestrictionConfig {
   if (!config) {
@@ -375,6 +419,10 @@ function getEnableWeakerNestedSandbox(): boolean | undefined {
   return config?.enableWeakerNestedSandbox
 }
 
+function getRipgrepConfig(): { command: string; args?: string[] } {
+  return config?.ripgrep ?? { command: 'rg' }
+}
+
 function getProxyPort(): number | undefined {
   return managerContext?.httpProxyPort
 }
@@ -438,6 +486,7 @@ async function wrapWithSandbox(
         allowLocalBinding: getAllowLocalBinding(),
         ignoreViolations: getIgnoreViolations(),
         binShell,
+        ripgrepConfig: getRipgrepConfig(),
       })
 
     case 'linux':
@@ -454,6 +503,7 @@ async function wrapWithSandbox(
         enableWeakerNestedSandbox: getEnableWeakerNestedSandbox(),
         allowAllUnixSockets: getAllowAllUnixSockets(),
         binShell,
+        ripgrepConfig: getRipgrepConfig(),
       })
 
     default:
@@ -489,26 +539,30 @@ async function reset(): Promise<void> {
         logForDebugging('Sent SIGTERM to HTTP bridge process')
 
         // Wait for process to exit
-        exitPromises.push(new Promise<void>((resolve) => {
-          httpBridgeProcess.once('exit', () => {
-            logForDebugging('HTTP bridge process exited')
-            resolve()
-          })
-          // Timeout after 5 seconds
-          setTimeout(() => {
-            if (!httpBridgeProcess.killed) {
-              logForDebugging('HTTP bridge did not exit, forcing SIGKILL', { level: 'warn' })
-              try {
-                if (httpBridgeProcess.pid) {
-                  process.kill(httpBridgeProcess.pid, 'SIGKILL')
+        exitPromises.push(
+          new Promise<void>(resolve => {
+            httpBridgeProcess.once('exit', () => {
+              logForDebugging('HTTP bridge process exited')
+              resolve()
+            })
+            // Timeout after 5 seconds
+            setTimeout(() => {
+              if (!httpBridgeProcess.killed) {
+                logForDebugging('HTTP bridge did not exit, forcing SIGKILL', {
+                  level: 'warn',
+                })
+                try {
+                  if (httpBridgeProcess.pid) {
+                    process.kill(httpBridgeProcess.pid, 'SIGKILL')
+                  }
+                } catch {
+                  // Process may have already exited
                 }
-              } catch {
-                // Process may have already exited
               }
-            }
-            resolve()
-          }, 5000)
-        }))
+              resolve()
+            }, 5000)
+          }),
+        )
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
           logForDebugging(`Error killing HTTP bridge: ${err}`, {
@@ -525,26 +579,30 @@ async function reset(): Promise<void> {
         logForDebugging('Sent SIGTERM to SOCKS bridge process')
 
         // Wait for process to exit
-        exitPromises.push(new Promise<void>((resolve) => {
-          socksBridgeProcess.once('exit', () => {
-            logForDebugging('SOCKS bridge process exited')
-            resolve()
-          })
-          // Timeout after 5 seconds
-          setTimeout(() => {
-            if (!socksBridgeProcess.killed) {
-              logForDebugging('SOCKS bridge did not exit, forcing SIGKILL', { level: 'warn' })
-              try {
-                if (socksBridgeProcess.pid) {
-                  process.kill(socksBridgeProcess.pid, 'SIGKILL')
+        exitPromises.push(
+          new Promise<void>(resolve => {
+            socksBridgeProcess.once('exit', () => {
+              logForDebugging('SOCKS bridge process exited')
+              resolve()
+            })
+            // Timeout after 5 seconds
+            setTimeout(() => {
+              if (!socksBridgeProcess.killed) {
+                logForDebugging('SOCKS bridge did not exit, forcing SIGKILL', {
+                  level: 'warn',
+                })
+                try {
+                  if (socksBridgeProcess.pid) {
+                    process.kill(socksBridgeProcess.pid, 'SIGKILL')
+                  }
+                } catch {
+                  // Process may have already exited
                 }
-              } catch {
-                // Process may have already exited
               }
-            }
-            resolve()
-          }, 5000)
-        }))
+              resolve()
+            }, 5000)
+          }),
+        )
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
           logForDebugging(`Error killing SOCKS bridge: ${err}`, {
@@ -616,6 +674,7 @@ async function reset(): Promise<void> {
   socksProxyServer = undefined
   managerContext = undefined
   initializationPromise = undefined
+  dependenciesCheckCache = undefined
 }
 
 function getSandboxViolationStore() {
@@ -696,6 +755,7 @@ export interface ISandboxManager {
   ): Promise<void>
   isSupportedPlatform(platform: Platform): boolean
   isSandboxingEnabled(): boolean
+  checkDependencies(): boolean
   getFsReadConfig(): FsReadRestrictionConfig
   getFsWriteConfig(): FsWriteRestrictionConfig
   getNetworkRestrictionConfig(): NetworkRestrictionConfig
@@ -726,6 +786,7 @@ export const SandboxManager: ISandboxManager = {
   initialize,
   isSupportedPlatform,
   isSandboxingEnabled,
+  checkDependencies,
   getFsReadConfig,
   getFsWriteConfig,
   getNetworkRestrictionConfig,

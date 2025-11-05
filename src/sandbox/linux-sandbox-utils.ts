@@ -44,6 +44,7 @@ export interface LinuxSandboxParams {
   enableWeakerNestedSandbox?: boolean
   allowAllUnixSockets?: boolean
   binShell?: string
+  ripgrepConfig?: { command: string; args?: string[] }
 }
 
 // Track generated seccomp filters for cleanup on process exit
@@ -78,7 +79,9 @@ function registerSeccompCleanupHandler(): void {
  * - On x64/arm64: Pre-generated BPF filters and apply-seccomp binaries available
  * - On other architectures: Not currently supported (no apply-seccomp binary available)
  */
-export function hasLinuxSandboxDependenciesSync(allowAllUnixSockets = false): boolean {
+export function hasLinuxSandboxDependenciesSync(
+  allowAllUnixSockets = false,
+): boolean {
   try {
     const bwrapResult = spawnSync('which', ['bwrap'], {
       stdio: 'ignore',
@@ -108,8 +111,8 @@ export function hasLinuxSandboxDependenciesSync(allowAllUnixSockets = false): bo
         // the apply-seccomp binary to actually apply the filter
         logForDebugging(
           `[Sandbox Linux] Architecture ${process.arch} is not supported for seccomp filtering. ` +
-          `Only x64 and arm64 are currently supported. To disable Unix socket blocking, ` +
-          `set allowAllUnixSockets: true in your configuration.`,
+            `Only x64 and arm64 are currently supported. To disable Unix socket blocking, ` +
+            `set allowAllUnixSockets: true in your configuration.`,
           { level: 'warn' },
         )
         return false
@@ -290,7 +293,7 @@ function buildSandboxCommand(
     if (!applySeccompBinary) {
       throw new Error(
         'apply-seccomp binary not found. This should have been caught earlier. ' +
-        'Ensure vendor/seccomp/{x64,arm64}/apply-seccomp binaries are included in the package.',
+          'Ensure vendor/seccomp/{x64,arm64}/apply-seccomp binaries are included in the package.',
       )
     }
 
@@ -321,6 +324,7 @@ function buildSandboxCommand(
 async function generateFilesystemArgs(
   readConfig: FsReadRestrictionConfig | undefined,
   writeConfig: FsWriteRestrictionConfig | undefined,
+  ripgrepConfig: { command: string; args?: string[] } = { command: 'rg' },
 ): Promise<string[]> {
   const args: string[] = []
   // fs already imported
@@ -361,7 +365,7 @@ async function generateFilesystemArgs(
     // Deny writes within allowed paths (user-specified + mandatory denies)
     const denyPaths = [
       ...(writeConfig.denyWithinAllow || []),
-      ...(await getMandatoryDenyWithinAllow()),
+      ...(await getMandatoryDenyWithinAllow(ripgrepConfig)),
     ]
 
     for (const pathPattern of denyPaths) {
@@ -494,6 +498,7 @@ export async function wrapCommandWithSandboxLinux(
     enableWeakerNestedSandbox,
     allowAllUnixSockets,
     binShell,
+    ripgrepConfig = { command: 'rg' },
   } = params
 
   // Check if we need any sandboxing
@@ -587,7 +592,11 @@ export async function wrapCommandWithSandboxLinux(
     }
 
     // ========== FILESYSTEM RESTRICTIONS ==========
-    const fsArgs = await generateFilesystemArgs(readConfig, writeConfig)
+    const fsArgs = await generateFilesystemArgs(
+      readConfig,
+      writeConfig,
+      ripgrepConfig,
+    )
     bwrapArgs.push(...fsArgs)
 
     // Always bind /dev
@@ -610,7 +619,9 @@ export async function wrapCommandWithSandboxLinux(
     // Use the user's shell (zsh, bash, etc.) to ensure aliases/snapshots work
     // Resolve the full path to the shell binary since bwrap doesn't use $PATH
     const shellName = binShell || 'bash'
-    const shellPathResult = spawnSync('which', [shellName], { encoding: 'utf8' })
+    const shellPathResult = spawnSync('which', [shellName], {
+      encoding: 'utf8',
+    })
     if (shellPathResult.status !== 0) {
       throw new Error(`Shell '${shellName}' not found in PATH`)
     }
@@ -637,7 +648,7 @@ export async function wrapCommandWithSandboxLinux(
       if (!applySeccompBinary) {
         throw new Error(
           'apply-seccomp binary not found. This should have been caught earlier. ' +
-          'Ensure vendor/seccomp/{x64,arm64}/apply-seccomp binaries are included in the package.',
+            'Ensure vendor/seccomp/{x64,arm64}/apply-seccomp binaries are included in the package.',
         )
       }
 

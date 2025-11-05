@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 import { Command } from 'commander'
 import { SandboxManager } from './index.js'
-import { SandboxRuntimeConfigSchema, type SandboxRuntimeConfig } from './sandbox/sandbox-config.js'
+import {
+  SandboxRuntimeConfigSchema,
+  type SandboxRuntimeConfig,
+} from './sandbox/sandbox-config.js'
 import { spawn } from 'child_process'
 import { logForDebugging } from './utils/debug.js'
 import * as fs from 'fs'
@@ -29,7 +32,7 @@ function loadConfig(filePath: string): SandboxRuntimeConfig | null {
 
     if (!result.success) {
       console.error(`Invalid configuration in ${filePath}:`)
-      result.error.issues.forEach((issue) => {
+      result.error.issues.forEach(issue => {
         const path = issue.path.join('.')
         console.error(`  - ${path}: ${issue.message}`)
       })
@@ -107,7 +110,9 @@ async function main(): Promise<void> {
           let runtimeConfig = loadConfig(configPath)
 
           if (!runtimeConfig) {
-            logForDebugging(`No config found at ${configPath}, using default config`)
+            logForDebugging(
+              `No config found at ${configPath}, using default config`,
+            )
             runtimeConfig = getDefaultConfig()
           }
 

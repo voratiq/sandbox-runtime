@@ -15,6 +15,7 @@ export {
   NetworkConfigSchema,
   FilesystemConfigSchema,
   IgnoreViolationsConfigSchema,
+  RipgrepConfigSchema,
 } from './sandbox/sandbox-config.js'
 
 // Schema types and utilities
@@ -27,7 +28,6 @@ export type {
 } from './sandbox/sandbox-schemas.js'
 
 // Platform-specific utilities
-export { hasLinuxSandboxDependenciesSync } from './sandbox/linux-sandbox-utils.js'
 export type { SandboxViolationEvent } from './sandbox/macos-sandbox-utils.js'
 
 // Utility functions
