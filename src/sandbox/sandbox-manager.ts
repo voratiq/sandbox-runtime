@@ -198,13 +198,29 @@ async function initialize(
   sandboxAskCallback?: SandboxAskCallback,
   enableLogMonitor = false,
 ): Promise<void> {
-  // Store config for use by other functions
-  config = runtimeConfig
-
   // Return if already initializing
   if (initializationPromise) {
     await initializationPromise
     return
+  }
+
+  // Store config for use by other functions
+  config = runtimeConfig
+
+  // Check dependencies now that we have config with ripgrep info
+  if (!checkDependencies()) {
+    const platform = getPlatform()
+    let errorMessage = 'Sandbox dependencies are not available on this system.'
+
+    if (platform === 'linux') {
+      errorMessage += ' Required: ripgrep (rg), bubblewrap (bwrap), and socat.'
+    } else if (platform === 'macos') {
+      errorMessage += ' Required: ripgrep (rg).'
+    } else {
+      errorMessage += ` Platform '${platform}' is not supported.`
+    }
+
+    throw new Error(errorMessage)
   }
 
   // Start log monitor for macOS if enabled
@@ -296,36 +312,36 @@ function checkDependencies(): boolean {
     return dependenciesCheckCache
   }
 
-  const platform = getPlatform()
+  function computeDependencies(): boolean {
+    const platform = getPlatform()
 
-  // Check platform support
-  if (!isSupportedPlatform(platform)) {
-    dependenciesCheckCache = false
-    return false
-  }
-
-  // Check ripgrep - only check 'rg' if no custom command is configured
-  // If custom command is provided, we trust it exists (will fail naturally if not)
-  const hasCustomRipgrep = config?.ripgrep?.command !== undefined
-  if (!hasCustomRipgrep) {
-    // Only check for default 'rg' command
-    if (!hasRipgrepSync()) {
-      dependenciesCheckCache = false
+    // Check platform support
+    if (!isSupportedPlatform(platform)) {
       return false
     }
+
+    // Check ripgrep - only check 'rg' if no custom command is configured
+    // If custom command is provided, we trust it exists (will fail naturally if not)
+    const hasCustomRipgrep = config?.ripgrep?.command !== undefined
+    if (!hasCustomRipgrep) {
+      // Only check for default 'rg' command
+      if (!hasRipgrepSync()) {
+        return false
+      }
+    }
+
+    // Platform-specific dependency checks
+    if (platform === 'linux') {
+      const allowAllUnixSockets = config?.network?.allowAllUnixSockets ?? false
+      return hasLinuxSandboxDependenciesSync(allowAllUnixSockets)
+    }
+
+    // macOS only needs ripgrep (already checked above)
+    return true
   }
 
-  // Platform-specific dependency checks
-  if (platform === 'linux') {
-    const allowAllUnixSockets = config?.network?.allowAllUnixSockets ?? false
-    const result = hasLinuxSandboxDependenciesSync(allowAllUnixSockets)
-    dependenciesCheckCache = result
-    return result
-  }
-
-  // macOS only needs ripgrep (already checked above)
-  dependenciesCheckCache = true
-  return true
+  dependenciesCheckCache = computeDependencies()
+  return dependenciesCheckCache
 }
 
 function getFsReadConfig(): FsReadRestrictionConfig {
