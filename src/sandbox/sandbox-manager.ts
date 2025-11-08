@@ -2,6 +2,7 @@ import { createHttpProxyServer } from './http-proxy.js'
 import { createSocksProxyServer } from './socks-proxy.js'
 import type { SocksProxyWrapper } from './socks-proxy.js'
 import { logForDebugging } from '../utils/debug.js'
+import type { TelemetrySandboxVerdict } from '../utils/telemetry.js'
 import { getPlatform, type Platform } from '../utils/platform.js'
 import * as fs from 'fs'
 import type { SandboxRuntimeConfig } from './sandbox-config.js'
@@ -82,21 +83,44 @@ function matchesDomainPattern(hostname: string, pattern: string): boolean {
   return hostname.toLowerCase() === pattern.toLowerCase()
 }
 
+interface NetworkFilterDecision {
+  allowed: boolean
+  verdict: TelemetrySandboxVerdict
+}
+
+function createNetworkVerdict(
+  decision: 'allow' | 'deny',
+  reason: string,
+  policyTag = 'network.allowlist',
+): TelemetrySandboxVerdict {
+  return {
+    decision,
+    reason,
+    policy_tag: policyTag,
+  }
+}
+
 async function filterNetworkRequest(
   port: number,
   host: string,
   sandboxAskCallback?: SandboxAskCallback,
-): Promise<boolean> {
+): Promise<NetworkFilterDecision> {
   if (!config) {
     logForDebugging('No config available, denying network request')
-    return false
+    return {
+      allowed: false,
+      verdict: createNetworkVerdict('deny', 'runtime_config_missing'),
+    }
   }
 
   // Check denied domains first
   for (const deniedDomain of config.network.deniedDomains) {
     if (matchesDomainPattern(host, deniedDomain)) {
       logForDebugging(`Denied by config rule: ${host}:${port}`)
-      return false
+      return {
+        allowed: false,
+        verdict: createNetworkVerdict('deny', `denylist:${deniedDomain}`),
+      }
     }
   }
 
@@ -104,14 +128,20 @@ async function filterNetworkRequest(
   for (const allowedDomain of config.network.allowedDomains) {
     if (matchesDomainPattern(host, allowedDomain)) {
       logForDebugging(`Allowed by config rule: ${host}:${port}`)
-      return true
+      return {
+        allowed: true,
+        verdict: createNetworkVerdict('allow', `allowlist:${allowedDomain}`),
+      }
     }
   }
 
   // No matching rules - ask user or deny
   if (!sandboxAskCallback) {
     logForDebugging(`No matching config rule, denying: ${host}:${port}`)
-    return false
+    return {
+      allowed: false,
+      verdict: createNetworkVerdict('deny', 'no_matching_rule'),
+    }
   }
 
   logForDebugging(`No matching config rule, asking user: ${host}:${port}`)
@@ -119,16 +149,25 @@ async function filterNetworkRequest(
     const userAllowed = await sandboxAskCallback({ host, port })
     if (userAllowed) {
       logForDebugging(`User allowed: ${host}:${port}`)
-      return true
+      return {
+        allowed: true,
+        verdict: createNetworkVerdict('allow', 'user_override'),
+      }
     } else {
       logForDebugging(`User denied: ${host}:${port}`)
-      return false
+      return {
+        allowed: false,
+        verdict: createNetworkVerdict('deny', 'user_override_denied'),
+      }
     }
   } catch (error) {
     logForDebugging(`Error in permission callback: ${error}`, {
       level: 'error',
     })
-    return false
+    return {
+      allowed: false,
+      verdict: createNetworkVerdict('deny', 'callback_error'),
+    }
   }
 }
 
@@ -238,25 +277,30 @@ async function initialize(
   // Initialize network infrastructure
   initializationPromise = (async () => {
     try {
-      // Conditionally start proxy servers based on config
-      let httpProxyPort: number
-      if (config.network.httpProxyPort !== undefined) {
-        // Use external HTTP proxy (don't start a server)
-        httpProxyPort = config.network.httpProxyPort
-        logForDebugging(`Using external HTTP proxy on port ${httpProxyPort}`)
-      } else {
-        // Start local HTTP proxy
-        httpProxyPort = await startHttpProxyServer(sandboxAskCallback)
+      const shouldUseExternalHttpProxy =
+        config.network.httpProxyPort !== undefined
+      const shouldUseExternalSocksProxy =
+        config.network.socksProxyPort !== undefined
+
+      const [httpProxyPort, socksProxyPort] = await Promise.all([
+        shouldUseExternalHttpProxy
+          ? Promise.resolve(config.network.httpProxyPort!)
+          : startHttpProxyServer(sandboxAskCallback),
+        shouldUseExternalSocksProxy
+          ? Promise.resolve(config.network.socksProxyPort!)
+          : startSocksProxyServer(sandboxAskCallback),
+      ])
+
+      if (shouldUseExternalHttpProxy) {
+        logForDebugging(
+          `Using external HTTP proxy on port ${config.network.httpProxyPort}`,
+        )
       }
 
-      let socksProxyPort: number
-      if (config.network.socksProxyPort !== undefined) {
-        // Use external SOCKS proxy (don't start a server)
-        socksProxyPort = config.network.socksProxyPort
-        logForDebugging(`Using external SOCKS proxy on port ${socksProxyPort}`)
-      } else {
-        // Start local SOCKS proxy
-        socksProxyPort = await startSocksProxyServer(sandboxAskCallback)
+      if (shouldUseExternalSocksProxy) {
+        logForDebugging(
+          `Using external SOCKS proxy on port ${config.network.socksProxyPort}`,
+        )
       }
 
       // Initialize platform-specific infrastructure
@@ -343,7 +387,6 @@ function checkDependencies(): boolean {
   dependenciesCheckCache = computeDependencies()
   return dependenciesCheckCache
 }
-
 function getFsReadConfig(): FsReadRestrictionConfig {
   if (!config) {
     return { denyOnly: [] }
@@ -655,7 +698,7 @@ async function reset(): Promise<void> {
     }
   }
 
-  // Close servers in parallel (only if they exist, i.e., were started by us)
+  // Close servers in parallel
   const closePromises: Promise<void>[] = []
 
   if (httpProxyServer) {

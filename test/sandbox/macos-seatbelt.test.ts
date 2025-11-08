@@ -26,6 +26,25 @@ function skipIfNotMacOS(): boolean {
 }
 
 describe('macOS Seatbelt Read Bypass Prevention', () => {
+  describe('Mach lookup allowances', () => {
+    it('includes configd in the sandbox profile', async () => {
+      if (skipIfNotMacOS()) {
+        return
+      }
+
+      const wrappedCommand = await wrapCommandWithSandboxMacOS({
+        command: 'echo ok',
+        needsNetworkRestriction: true,
+        httpProxyPort: 8080,
+        socksProxyPort: 9050,
+        readConfig: undefined,
+        writeConfig: undefined,
+      })
+
+      expect(wrappedCommand).toContain('com.apple.SystemConfiguration.configd')
+    })
+  })
+
   const TEST_BASE_DIR = join(tmpdir(), 'seatbelt-test-' + Date.now())
   const TEST_DENIED_DIR = join(TEST_BASE_DIR, 'denied-dir')
   const TEST_SECRET_FILE = join(TEST_DENIED_DIR, 'secret.txt')

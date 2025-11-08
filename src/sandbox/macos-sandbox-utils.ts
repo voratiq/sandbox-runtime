@@ -372,6 +372,8 @@ async function generateSandboxProfile({
     '  (global-name "com.apple.system.opendirectoryd.membership")',
     '  (global-name "com.apple.bsd.dirhelper")',
     '  (global-name "com.apple.securityd.xpc")',
+    // Voratiq: allow configd for network queries
+    '  (global-name "com.apple.SystemConfiguration.configd")',
     '  (global-name "com.apple.coreservices.launchservicesd")',
     ')',
     '',
@@ -465,6 +467,8 @@ async function generateSandboxProfile({
     '',
     '; Specific mach-lookup permissions for security operations',
     '(allow mach-lookup (global-name "com.apple.SecurityServer"))',
+    // Voratiq: allow configd for network queries
+    '(allow mach-lookup (global-name "com.apple.SystemConfiguration.configd"))',
     '',
     '; File I/O on device files',
     '(allow file-ioctl (literal "/dev/null"))',

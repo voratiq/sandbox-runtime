@@ -7,9 +7,20 @@ import {
 } from './sandbox/sandbox-config.js'
 import { spawn } from 'child_process'
 import { logForDebugging } from './utils/debug.js'
+import {
+  initializeTelemetry,
+  emitTelemetryEvent,
+  sanitizeCommandArgs,
+  isTelemetryEnabled,
+} from './utils/telemetry.js'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
+import { performance } from 'node:perf_hooks'
+import { createRequire } from 'module'
+
+const require = createRequire(import.meta.url)
+const { version } = require('../package.json') as { version: string }
 
 /**
  * Load and validate sandbox configuration from a file
@@ -83,7 +94,7 @@ async function main(): Promise<void> {
     .description(
       'Run commands in a sandbox with network and filesystem restrictions',
     )
-    .version(process.env.npm_package_version || '1.0.0')
+    .version(version)
 
   // Default command - run command in sandbox
   program
@@ -100,9 +111,32 @@ async function main(): Promise<void> {
         options: { debug?: boolean; settings?: string },
       ) => {
         try {
-          // Enable debug logging if requested
-          if (options.debug) {
+          const sanitizedCommand = sanitizeCommandArgs(commandArgs)
+
+          const debugEnabled = Boolean(options.debug)
+
+          if (debugEnabled && !process.env.DEBUG) {
             process.env.DEBUG = 'true'
+          }
+
+          const traceId = initializeTelemetry({
+            debugEnabled,
+            commandArgs,
+          })
+
+          if (traceId && isTelemetryEnabled()) {
+            emitTelemetryEvent({
+              stage: 'start',
+              status: 'success',
+              attempt: 0,
+              command: sanitizedCommand,
+              sandbox_verdict: {
+                decision: 'allow',
+                reason: 'cli_invocation',
+                policy_tag: 'command.execution',
+              },
+              egress_type: 'command',
+            })
           }
 
           // Load config from file
@@ -124,6 +158,8 @@ async function main(): Promise<void> {
           const command = commandArgs.join(' ')
           logForDebugging(`Original command: ${command}`)
 
+          const commandStart = performance.now()
+
           logForDebugging(
             JSON.stringify(
               SandboxManager.getNetworkRestrictionConfig(),
@@ -137,6 +173,21 @@ async function main(): Promise<void> {
 
           // Execute the sandboxed command
           console.log(`Running: ${command}`)
+          if (isTelemetryEnabled()) {
+            emitTelemetryEvent({
+              stage: 'attempt',
+              status: 'success',
+              attempt: 0,
+              command: sanitizedCommand,
+              sandbox_verdict: {
+                decision: 'allow',
+                reason: 'sandbox_wrap',
+                policy_tag: 'command.execution',
+              },
+              egress_type: 'command',
+            })
+          }
+
           const child = spawn(sandboxedCommand, {
             shell: true,
             stdio: 'inherit',
@@ -144,15 +195,68 @@ async function main(): Promise<void> {
 
           // Handle process exit
           child.on('exit', (code, signal) => {
+            const latency = performance.now() - commandStart
+
             if (signal) {
               console.error(`Process killed by signal: ${signal}`)
+              if (isTelemetryEnabled()) {
+                emitTelemetryEvent({
+                  stage: 'completion',
+                  status: 'cancelled',
+                  attempt: 0,
+                  status_code: null,
+                  command: sanitizedCommand,
+                  sandbox_verdict: {
+                    decision: 'allow',
+                    reason: `terminated_by_${signal.toLowerCase()}`,
+                    policy_tag: 'command.execution',
+                  },
+                  latency_ms: latency,
+                  egress_type: 'command',
+                })
+              }
+
               process.exit(1)
             }
+
+            if (isTelemetryEnabled()) {
+              emitTelemetryEvent({
+                stage: 'completion',
+                status: code === 0 ? 'success' : 'failed',
+                attempt: 0,
+                status_code: code ?? null,
+                command: sanitizedCommand,
+                sandbox_verdict: {
+                  decision: 'allow',
+                  reason: 'process_exit',
+                  policy_tag: 'command.execution',
+                },
+                latency_ms: latency,
+                egress_type: 'command',
+              })
+            }
+
             process.exit(code ?? 0)
           })
 
           child.on('error', error => {
             console.error(`Failed to execute command: ${error.message}`)
+            if (isTelemetryEnabled()) {
+              emitTelemetryEvent({
+                stage: 'failure',
+                status: 'failed',
+                attempt: 0,
+                status_code: null,
+                command: sanitizedCommand,
+                sandbox_verdict: {
+                  decision: 'allow',
+                  reason: 'process_spawn_error',
+                  policy_tag: 'command.execution',
+                },
+                latency_ms: performance.now() - commandStart,
+                egress_type: 'command',
+              })
+            }
             process.exit(1)
           })
 
@@ -168,6 +272,21 @@ async function main(): Promise<void> {
           console.error(
             `Error: ${error instanceof Error ? error.message : String(error)}`,
           )
+          if (isTelemetryEnabled()) {
+            emitTelemetryEvent({
+              stage: 'failure',
+              status: 'failed',
+              attempt: 0,
+              status_code: null,
+              sandbox_verdict: {
+                decision: null,
+                reason: 'cli_error',
+                policy_tag: 'command.execution',
+              },
+              latency_ms: null,
+              egress_type: 'command',
+            })
+          }
           process.exit(1)
         }
       },
