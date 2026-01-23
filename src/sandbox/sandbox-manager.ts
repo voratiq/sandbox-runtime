@@ -30,6 +30,14 @@ import {
 import { hasRipgrepSync } from '../utils/ripgrep.js'
 import { SandboxViolationStore } from './sandbox-violation-store.js'
 import { EOL } from 'node:os'
+import type { ChildProcess, SpawnOptions } from 'node:child_process'
+import { spawn as nodeSpawn } from 'node:child_process'
+import {
+  emitFsViolationEvent,
+  getSandboxEventContextDepth,
+  pushSandboxEventContext,
+  type SandboxEvents,
+} from './observability.js'
 
 interface HostNetworkManagerContext {
   httpProxyPort: number
@@ -86,17 +94,20 @@ async function filterNetworkRequest(
   port: number,
   host: string,
   sandboxAskCallback?: SandboxAskCallback,
-): Promise<boolean> {
+): Promise<{
+  allowed: boolean
+  reason: 'allowlist' | 'denylist' | 'no-match'
+}> {
   if (!config) {
     logForDebugging('No config available, denying network request')
-    return false
+    return { allowed: false, reason: 'no-match' }
   }
 
   // Check denied domains first
   for (const deniedDomain of config.network.deniedDomains) {
     if (matchesDomainPattern(host, deniedDomain)) {
       logForDebugging(`Denied by config rule: ${host}:${port}`)
-      return false
+      return { allowed: false, reason: 'denylist' }
     }
   }
 
@@ -104,14 +115,14 @@ async function filterNetworkRequest(
   for (const allowedDomain of config.network.allowedDomains) {
     if (matchesDomainPattern(host, allowedDomain)) {
       logForDebugging(`Allowed by config rule: ${host}:${port}`)
-      return true
+      return { allowed: true, reason: 'allowlist' }
     }
   }
 
   // No matching rules - ask user or deny
   if (!sandboxAskCallback) {
     logForDebugging(`No matching config rule, denying: ${host}:${port}`)
-    return false
+    return { allowed: false, reason: 'no-match' }
   }
 
   logForDebugging(`No matching config rule, asking user: ${host}:${port}`)
@@ -119,16 +130,16 @@ async function filterNetworkRequest(
     const userAllowed = await sandboxAskCallback({ host, port })
     if (userAllowed) {
       logForDebugging(`User allowed: ${host}:${port}`)
-      return true
+      return { allowed: true, reason: 'no-match' }
     } else {
       logForDebugging(`User denied: ${host}:${port}`)
-      return false
+      return { allowed: false, reason: 'no-match' }
     }
   } catch (error) {
     logForDebugging(`Error in permission callback: ${error}`, {
       level: 'error',
     })
-    return false
+    return { allowed: false, reason: 'no-match' }
   }
 }
 
@@ -248,10 +259,16 @@ async function initialize(
 
   // Start log monitor for macOS if enabled
   if (enableLogMonitor && getPlatform() === 'macos') {
-    logMonitorShutdown = startMacOSSandboxLogMonitor(
-      sandboxViolationStore.addViolation.bind(sandboxViolationStore),
-      config.ignoreViolations,
-    )
+    logMonitorShutdown = startMacOSSandboxLogMonitor(violation => {
+      sandboxViolationStore.addViolation(violation)
+
+      // Emit structured violation events for observability consumers.
+      // Only emit when a consumer has registered an event handler.
+      const parsed = parseFsViolationLine(violation.line)
+      if (parsed) {
+        emitFsViolationEvent(parsed)
+      }
+    }, config.ignoreViolations)
     logForDebugging('Started macOS sandbox log monitor')
   }
 
@@ -802,8 +819,127 @@ async function reset(): Promise<void> {
   initializationPromise = undefined
 }
 
+export interface SandboxSpawnOptions extends SpawnOptions {
+  correlationId?: string
+  events?: SandboxEvents
+  binShell?: string
+  customConfig?: Partial<SandboxRuntimeConfig>
+  abortSignal?: AbortSignal
+}
+
+async function spawn(
+  command: string,
+  options: SandboxSpawnOptions = {},
+): Promise<ChildProcess> {
+  const {
+    correlationId,
+    events,
+    binShell,
+    customConfig,
+    abortSignal,
+    ...spawnOptions
+  } = options
+
+  // Prefer explicit abortSignal, but fall back to Node's spawn AbortSignal.
+  const wrapAbortSignal = abortSignal ?? spawnOptions.signal
+
+  const sandboxedCommand = await wrapWithSandbox(
+    command,
+    binShell,
+    customConfig,
+    wrapAbortSignal,
+  )
+
+  const shouldEmitEvents = !!events?.onEvent
+  if (shouldEmitEvents && getSandboxEventContextDepth() > 0) {
+    throw new Error(
+      'SandboxManager.spawn does not support concurrent spawns when events are enabled.',
+    )
+  }
+
+  const disposeContext = shouldEmitEvents
+    ? pushSandboxEventContext({ correlationId, onEvent: events?.onEvent })
+    : () => {}
+
+  let cleanedUp = false
+  const cleanup = (): void => {
+    if (cleanedUp) return
+    cleanedUp = true
+    disposeContext()
+  }
+
+  try {
+    const child = nodeSpawn(sandboxedCommand, {
+      ...spawnOptions,
+      shell: spawnOptions.shell ?? true,
+    })
+    child.once('exit', cleanup)
+    child.once('error', cleanup)
+    return child
+  } catch (err) {
+    cleanup()
+    throw err
+  }
+}
+
 function getSandboxViolationStore() {
   return sandboxViolationStore
+}
+
+function parseFsViolationLine(line: string):
+  | {
+      path: string
+      operation: 'read' | 'write'
+      reason: 'denyRead' | 'denyWrite' | 'no-allowWrite'
+    }
+  | undefined {
+  // Example: "bash(123) deny file-read-data /etc/passwd"
+  // Example: "bash(123) deny file-write-data /private/tmp/foo"
+  const match = line.match(/\bdeny\s+([^\s]+)\s+(.+?)\s*$/)
+  if (!match?.[1] || !match[2]) return
+
+  const operationToken = match[1].toLowerCase()
+  let rawPath = match[2]
+  const tagIndex = rawPath.indexOf('CMD64_')
+  if (tagIndex !== -1) {
+    rawPath = rawPath.slice(0, tagIndex).trimEnd()
+  }
+
+  const isRead = operationToken.startsWith('file-read')
+  const isWrite = operationToken.startsWith('file-write')
+  if (!isRead && !isWrite) return
+
+  const operation = isRead ? 'read' : 'write'
+
+  // Heuristic: if write restrictions are enabled, distinguish denies due to
+  // explicit denyWrite vs default-deny (no allowWrite match).
+  if (operation === 'read') {
+    return { path: rawPath, operation, reason: 'denyRead' }
+  }
+
+  // If sandboxing isn't enabled or no config, default to no-allowWrite.
+  if (!config) {
+    return { path: rawPath, operation, reason: 'no-allowWrite' }
+  }
+
+  const writeConfig = getFsWriteConfig()
+
+  const normalizedPath = rawPath
+  const withinAnyAllow = writeConfig.allowOnly.some(allowPath => {
+    // allowPath values may include globs in config, but getFsWriteConfig() has
+    // already normalized them for platform support.
+    return (
+      normalizedPath === allowPath ||
+      normalizedPath.startsWith(
+        allowPath.endsWith('/') ? allowPath : allowPath + '/',
+      )
+    )
+  })
+
+  // If the write was within an allowed subtree but still denied, it must have
+  // hit an explicit deny rule (denyWrite or mandatory denies).
+  const reason = withinAnyAllow ? 'denyWrite' : 'no-allowWrite'
+  return { path: rawPath, operation, reason }
 }
 
 function annotateStderrWithSandboxFailures(
@@ -902,6 +1038,7 @@ export interface ISandboxManager {
     customConfig?: Partial<SandboxRuntimeConfig>,
     abortSignal?: AbortSignal,
   ): Promise<string>
+  spawn(command: string, options?: SandboxSpawnOptions): Promise<ChildProcess>
   getSandboxViolationStore(): SandboxViolationStore
   annotateStderrWithSandboxFailures(command: string, stderr: string): string
   getLinuxGlobPatternWarnings(): string[]
@@ -936,6 +1073,7 @@ export const SandboxManager: ISandboxManager = {
   getLinuxSocksSocketPath,
   waitForNetworkInitialization,
   wrapWithSandbox,
+  spawn,
   reset,
   getSandboxViolationStore,
   annotateStderrWithSandboxFailures,

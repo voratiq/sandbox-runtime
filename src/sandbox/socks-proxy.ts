@@ -2,9 +2,16 @@ import type { Server as NetServer } from 'net'
 import type { Socks5Server } from '@pondwader/socks5-server'
 import { createServer } from '@pondwader/socks5-server'
 import { logForDebugging } from '../utils/debug.js'
+import {
+  emitNetworkDecisionEvent,
+  type NetworkFilterResult,
+} from './observability.js'
 
 export interface SocksProxyServerOptions {
-  filter(port: number, host: string): Promise<boolean> | boolean
+  filter(
+    port: number,
+    host: string,
+  ): Promise<boolean | NetworkFilterResult> | boolean | NetworkFilterResult
 }
 
 export interface SocksProxyWrapper {
@@ -20,6 +27,15 @@ export function createSocksProxyServer(
 ): SocksProxyWrapper {
   const socksServer = createServer()
 
+  const normalizeFilterResult = (
+    result: boolean | NetworkFilterResult,
+  ): NetworkFilterResult => {
+    if (typeof result === 'boolean') {
+      return { allowed: result, reason: 'no-match' }
+    }
+    return result
+  }
+
   socksServer.setRulesetValidator(async conn => {
     try {
       const hostname = conn.destAddress
@@ -27,9 +43,19 @@ export function createSocksProxyServer(
 
       logForDebugging(`Connection request to ${hostname}:${port}`)
 
-      const allowed = await options.filter(port, hostname)
+      const filterResult = normalizeFilterResult(
+        await options.filter(port, hostname),
+      )
 
-      if (!allowed) {
+      emitNetworkDecisionEvent({
+        host: hostname,
+        port,
+        decision: filterResult.allowed ? 'allow' : 'deny',
+        reason: filterResult.reason,
+        route: 'direct',
+      })
+
+      if (!filterResult.allowed) {
         logForDebugging(`Connection blocked to ${hostname}:${port}`, {
           level: 'error',
         })

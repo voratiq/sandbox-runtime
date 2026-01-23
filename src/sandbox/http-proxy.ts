@@ -6,13 +6,17 @@ import { request as httpsRequest } from 'node:https'
 import { connect } from 'node:net'
 import { URL } from 'node:url'
 import { logForDebugging } from '../utils/debug.js'
+import {
+  emitNetworkDecisionEvent,
+  type NetworkFilterResult,
+} from './observability.js'
 
 export interface HttpProxyServerOptions {
   filter(
     port: number,
     host: string,
     socket: Socket | Duplex,
-  ): Promise<boolean> | boolean
+  ): Promise<boolean | NetworkFilterResult> | boolean | NetworkFilterResult
 
   /**
    * Optional function to get the MITM proxy socket path for a given host.
@@ -20,6 +24,15 @@ export interface HttpProxyServerOptions {
    * If returns undefined, the request will be handled directly.
    */
   getMitmSocketPath?(host: string): string | undefined
+}
+
+function normalizeFilterResult(
+  result: boolean | NetworkFilterResult,
+): NetworkFilterResult {
+  if (typeof result === 'boolean') {
+    return { allowed: result, reason: 'no-match' }
+  }
+  return result
 }
 
 export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
@@ -44,8 +57,21 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
         return
       }
 
-      const allowed = await options.filter(port, hostname, socket)
-      if (!allowed) {
+      const filterResult = normalizeFilterResult(
+        await options.filter(port, hostname, socket),
+      )
+      const mitmSocketPath = options.getMitmSocketPath?.(hostname)
+      const route = mitmSocketPath ? 'mitm' : 'direct'
+
+      emitNetworkDecisionEvent({
+        host: hostname,
+        port,
+        decision: filterResult.allowed ? 'allow' : 'deny',
+        reason: filterResult.reason,
+        route,
+      })
+
+      if (!filterResult.allowed) {
         logForDebugging(`Connection blocked to ${hostname}:${port}`, {
           level: 'error',
         })
@@ -58,9 +84,6 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
         )
         return
       }
-
-      // Check if this host should be routed through a MITM proxy
-      const mitmSocketPath = options.getMitmSocketPath?.(hostname)
 
       if (mitmSocketPath) {
         // Route through MITM proxy via Unix socket
@@ -176,8 +199,21 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
           ? 443
           : 80
 
-      const allowed = await options.filter(port, hostname, req.socket)
-      if (!allowed) {
+      const filterResult = normalizeFilterResult(
+        await options.filter(port, hostname, req.socket),
+      )
+      const mitmSocketPath = options.getMitmSocketPath?.(hostname)
+      const route = mitmSocketPath ? 'mitm' : 'direct'
+
+      emitNetworkDecisionEvent({
+        host: hostname,
+        port,
+        decision: filterResult.allowed ? 'allow' : 'deny',
+        reason: filterResult.reason,
+        route,
+      })
+
+      if (!filterResult.allowed) {
         logForDebugging(`HTTP request blocked to ${hostname}:${port}`, {
           level: 'error',
         })
@@ -188,9 +224,6 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
         res.end('Connection blocked by network allowlist')
         return
       }
-
-      // Check if this host should be routed through a MITM proxy
-      const mitmSocketPath = options.getMitmSocketPath?.(hostname)
 
       if (mitmSocketPath) {
         // Route through MITM proxy via Unix socket
