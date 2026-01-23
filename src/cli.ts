@@ -168,10 +168,15 @@ async function main(): Promise<void> {
           const sandboxedCommand = await SandboxManager.wrapWithSandbox(command)
 
           // Execute the sandboxed command
+          const shouldPipe = !process.stdout.isTTY
           const child = spawn(sandboxedCommand, {
             shell: true,
-            stdio: 'inherit',
+            stdio: shouldPipe ? ['inherit', 'pipe', 'pipe'] : 'inherit',
           })
+          if (shouldPipe && child.stdout && child.stderr) {
+            child.stdout.pipe(process.stdout)
+            child.stderr.pipe(process.stderr)
+          }
 
           // Handle process exit
           child.on('exit', (code, signal) => {

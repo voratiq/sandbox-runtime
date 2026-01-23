@@ -1,6 +1,6 @@
 {
   "name": "@voratiq/sandbox-runtime",
-  "version": "0.0.29-voratiq0",
+  "version": "0.0.29-voratiq1",
   "description": "(Voratiq-maintained fork of the) Anthropic Sandbox Runtime (ASRT) - A general-purpose tool for wrapping security boundaries around arbitrary processes",
   "type": "module",
   "main": "./dist/index.js",

@@ -56,13 +56,13 @@ export function createSocksProxyServer(
       })
 
       if (!filterResult.allowed) {
-        logForDebugging(`Connection blocked to ${hostname}:${port}`, {
+        logForDebugging(`Connection blocked to ${hostname}:${port} (SOCKS)`, {
           level: 'error',
         })
         return false
       }
 
-      logForDebugging(`Connection allowed to ${hostname}:${port}`)
+      logForDebugging(`Connection allowed to ${hostname}:${port} (SOCKS)`)
       return true
     } catch (error) {
       logForDebugging(`Error validating connection: ${error}`, {
