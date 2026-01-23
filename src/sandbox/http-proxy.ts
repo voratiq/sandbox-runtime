@@ -42,7 +42,10 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
   server.on('connect', async (req, socket) => {
     // Attach error handler immediately to prevent unhandled errors
     socket.on('error', err => {
-      logForDebugging(`Client socket error: ${err.message}`, { level: 'error' })
+      logForDebugging(
+        `Client socket error (CONNECT ${req.url}): ${err.message}`,
+        { level: 'error' },
+      )
     })
 
     try {
@@ -149,9 +152,10 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
         })
 
         socket.on('error', err => {
-          logForDebugging(`Client socket error: ${err.message}`, {
-            level: 'error',
-          })
+          logForDebugging(
+            `Client socket error (MITM CONNECT ${hostname}:${port}): ${err.message}`,
+            { level: 'error' },
+          )
           mitmSocket.destroy()
         })
 
@@ -166,16 +170,18 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
         })
 
         serverSocket.on('error', err => {
-          logForDebugging(`CONNECT tunnel failed: ${err.message}`, {
-            level: 'error',
-          })
+          logForDebugging(
+            `CONNECT tunnel failed to ${hostname}:${port} - ${err.message}`,
+            { level: 'error' },
+          )
           socket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n')
         })
 
         socket.on('error', err => {
-          logForDebugging(`Client socket error: ${err.message}`, {
-            level: 'error',
-          })
+          logForDebugging(
+            `Client socket error (CONNECT ${hostname}:${port}): ${err.message}`,
+            { level: 'error' },
+          )
           serverSocket.destroy()
         })
 
