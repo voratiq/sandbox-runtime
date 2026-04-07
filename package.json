@@ -1,6 +1,6 @@
 {
   "name": "@voratiq/sandbox-runtime",
-  "version": "0.0.29-voratiq1",
+  "version": "0.0.29-voratiq2",
   "description": "(Voratiq-maintained fork of the) Anthropic Sandbox Runtime (ASRT) - A general-purpose tool for wrapping security boundaries around arbitrary processes",
   "type": "module",
   "main": "./dist/index.js",
@@ -30,7 +30,7 @@
     "@pondwader/socks5-server": "^1.0.10",
     "@types/lodash-es": "^4.17.12",
     "commander": "^12.1.0",
-    "lodash-es": "^4.17.21",
+    "lodash-es": "^4.18.1",
     "shell-quote": "^1.8.3",
     "zod": "^3.24.1"
   },
